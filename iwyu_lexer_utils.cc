@@ -12,10 +12,8 @@
 #include <cstring>
 #include <string>
 
-#include "clang/Basic/LangOptions.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/Lex/Lexer.h"
 #include "clang/Lex/Token.h"
 #include "iwyu_globals.h"
 #include "iwyu_port.h"  // for CHECK_
@@ -112,31 +110,6 @@ clang::tok::TokenKind GetNextMacroTokenKind(
     return token->getKind();
   }
   return clang::tok::unknown;
-}
-
-bool IsLiteralTokenAtLocation(SourceLocation loc, const SourceManager& sm,
-                              const clang::LangOptions& lang_opts) {
-  Token token;
-  if (clang::Lexer::getRawToken(loc, token, sm, lang_opts,
-                                /*IgnoreWhiteSpace=*/true)) {
-    return false;
-  }
-  switch (token.getKind()) {
-    case clang::tok::numeric_constant:
-    case clang::tok::char_constant:
-    case clang::tok::wide_char_constant:
-    case clang::tok::utf8_char_constant:
-    case clang::tok::utf16_char_constant:
-    case clang::tok::utf32_char_constant:
-    case clang::tok::string_literal:
-    case clang::tok::wide_string_literal:
-    case clang::tok::utf8_string_literal:
-    case clang::tok::utf16_string_literal:
-    case clang::tok::utf32_string_literal:
-      return true;
-    default:
-      return false;
-  }
 }
 
 }  // namespace include_what_you_use

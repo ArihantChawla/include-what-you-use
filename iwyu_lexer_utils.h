@@ -18,7 +18,6 @@
 #include "llvm/ADT/StringRef.h"
 
 namespace clang {
-class LangOptions;
 class SourceManager;
 class Token;
 }  // namespace clang
@@ -83,17 +82,6 @@ string GetTokenText(const clang::Token& token,
 clang::tok::TokenKind GetNextMacroTokenKind(
     const clang::MacroInfo* macro,
     clang::MacroInfo::const_tokens_iterator current);
-
-// Returns true if the token spelled at loc is a literal (numeric, character,
-// or string constant) rather than an identifier or other kind of token.
-// Used to recognize object-like macros such as '#define GREETING "hi"',
-// whose body can't itself be naming any decl -- any decl use whose location
-// resolves to such a spot must be a side effect of the macro's expansion
-// context (e.g. an implicit conversion at the call site), not something
-// the macro author wrote.
-bool IsLiteralTokenAtLocation(clang::SourceLocation loc,
-                              const clang::SourceManager& sm,
-                              const clang::LangOptions& lang_opts);
 
 }  // namespace include_what_you_use
 
