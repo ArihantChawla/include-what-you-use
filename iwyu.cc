@@ -132,6 +132,7 @@
 #include "iwyu_ast_util.h"
 #include "iwyu_cache.h"
 #include "iwyu_globals.h"
+#include "iwyu_lexer_utils.h"
 #include "iwyu_location_util.h"
 #include "iwyu_output.h"
 #include "iwyu_port.h"  // for CHECK_
@@ -1384,6 +1385,12 @@ class IwyuBaseAstVisitor : public BaseAstVisitor<Derived> {
     //    location.
     // 2) If the macro definition file forward-declares the used decl, that's a
     //    hint that it wants the expansion location to take responsibility.
+    // 3) If the macro's spelling is a literal (not an identifier), the macro
+    //    body can't be naming the used decl itself, so any use that resolves
+    //    there must be a side effect of the macro's expansion context (e.g.
+    //    an implicit conversion applied to a literal at the call site, as in
+    //    '#define GREETING "hi"' passed to a function taking std::string).
+    //    Attribute responsibility to the expansion location instead.
     //
     // Otherwise, the spelling loc is responsible.
     const char* side;
@@ -1399,6 +1406,13 @@ class IwyuBaseAstVisitor : public BaseAstVisitor<Derived> {
       side = "expansion";
     } else if (fwd_decl != nullptr) {
       VERRS(5) << "Found a hint decl in macro definition file\n";
+      use_loc = expansion_loc;
+      side = "expansion";
+    } else if (IsLiteralTokenAtLocation(spelling_loc, *sm,
+                                       compiler()->getLangOpts())) {
+      VERRS(5) << "Spelling location is a literal, not an identifier; can't "
+                  "be a reference authored by the macro, use expansion "
+                  "location instead\n";
       use_loc = expansion_loc;
       side = "expansion";
     } else {
