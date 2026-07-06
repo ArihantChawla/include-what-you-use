@@ -37,8 +37,30 @@ void test() {
   Type::run();
 }
 
+template <typename>
+struct Tpl {
+  template <typename U>
+  using Alias = typename U::template Nested<int>::Type;
+};
+
+template <typename T>
+void TplFn() {
+  typename T::template Nested<int> n;
+  (void)sizeof(n);
+}
+
+struct DependentFnReturn {
+  template <typename T>
+  static typename T::template NestedTpl<T> GetNestedTpl() {
+    return {};
+  }
+
+  using ThisType = DependentFnReturn;
+};
+
 int main() {
   test<0>();
+  Tpl<int> t;
 }
 
 /**** IWYU_SUMMARY

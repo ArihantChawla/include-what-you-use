@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-// IWYU_ARGS: -I .
+// IWYU_ARGS: -I . -Wno-user-defined-literals
 
 // Tests the internal IWYU standard library symbol mapping. In particular, tests
 // that the mapping works with types in the fwd-decl context.
@@ -33,12 +33,20 @@ void Fn() {
   (void)std::get<int>(pair2);
   // IWYU: std::get(const std::pair<:1, :0> &) is...*<utility>
   (void)std::get<char>(pair2);
+  // TODO: no need to report 'pair' here.
+  // IWYU: std::pair is...*<utility>
+  // IWYU: std::operator==(const std::pair<:0, :1> &, const std::pair<:2, :3> &) is...*<utility>
+  (void)(*p == pair2);
 
   // IWYU: std::array is...*<array>
   extern const std::array<int, 7> std_arr;
   // IWYU: std::get(const std::array<:1, :2> &&) is...*<array>
   // IWYU: std::move(:0 &&) is...*<utility>
   (void)std::get<1>(std::move(std_arr));
+  // TODO: no need to report 'array' here.
+  // IWYU: std::array is...*<array>
+  // IWYU: std::operator==(const std::array<:0, :1> &, const std::array<:0, :1> &) is...*<array>
+  (void)(std_arr == std_arr);
 
   int arr1[5] = {}, arr2[5] = {}, i1 = 0, i2 = 0;
   // IWYU: std::move(:0, :0, :1) is...*<algorithm>
@@ -64,6 +72,30 @@ void Fn() {
   (void)std::pow(2.0, 3.0);
   // IWYU: std::pow(long double, long double) is...*<cmath>
   (void)std::pow(2.0L, 3.0L);
+
+  // IWYU: std::basic_ostream needs a declaration
+  // IWYU: std::char_traits needs a declaration
+  std::basic_ostream<char, std::char_traits<char>>* os1;
+  // IWYU: std::basic_ostream needs a declaration
+  std::basic_ostream<char>* os2;
+  // IWYU should not attribute this basic_spanstream use to <iosfwd> because
+  // <spanstream> required for the definition is enough.
+  // IWYU: std::basic_spanstream needs a declaration
+  std::basic_spanstream<char>* ss;
+  // IWYU: std::basic_spanstream is...*<spanstream>
+  (void)sizeof(*ss);
+
+  {
+    using namespace std::chrono_literals;
+    // IWYU: operator""s({{.*}}) is...*<chrono>
+    (void)10s;
+  }
+
+  // Test that using int8_t from the global namespace triggers <cstdint>
+  // suggestion, not <cinttypes> suggestion due to stdint.h -> inttypes.h ->
+  // cinttypes mapping.
+  // IWYU: int8_t is...*<cstdint>
+  int8_t int8_t_var;
 }
 
 /**** IWYU_SUMMARY
@@ -71,8 +103,12 @@ void Fn() {
 tests/cxx/std_symbol_mapping.cc should add these lines:
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
+#include <iosfwd>
+#include <spanstream>
 #include <utility>
 #include <valarray>
 
@@ -81,10 +117,14 @@ tests/cxx/std_symbol_mapping.cc should remove these lines:
 
 The full include-list for tests/cxx/std_symbol_mapping.cc:
 #include <algorithm>  // for move
-#include <array>  // for array, get
+#include <array>  // for array, get, operator==
+#include <chrono>  // for operator""s
 #include <cmath>  // for pow
+#include <cstdint>  // for int8_t
 #include <functional>  // for function, swap
-#include <utility>  // for get, move, pair, swap
+#include <iosfwd>  // for basic_ostream (ptr only), char_traits (ptr only)
+#include <spanstream>  // for basic_spanstream
+#include <utility>  // for get, move, operator==, pair, swap
 #include <valarray>  // for pow, valarray
 
 ***** IWYU_SUMMARY */

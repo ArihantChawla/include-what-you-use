@@ -56,7 +56,7 @@ and data varies between the directives, see below.
 Note that you can mix directives of different kinds within the same mapping
 file.
 
-The `.imp` format looks like [JSON](http://json.org/), but IWYU actually uses
+The `.imp` format looks like [JSON](https://www.json.org/), but IWYU actually uses
 LLVM's [YAML](https://yaml.org/) parser to interpret the mapping files, which
 technically allows a richer syntax. We try to use a minimum of YAML features to
 get basic functionality (trailing comma syntax, `#` comments), but please be
@@ -115,17 +115,30 @@ header.
 Data for this directive is a list of four strings containing:
 
 * The symbol name to map from
-* The visibility of the symbol
+* The use kind of the symbol (`full` or `fwd-decl`, where `full` corresponds
+  to uses that require the complete type info for tag types)
 * The include name to map to
 * The visibility of the include name to map to
 
 For example;
 
-    { "symbol": ["NULL", "private", "<cstddef>", "public"] }
+    { "symbol": ["NULL", "full", "<cstddef>", "public"] }
 
-The symbol visibility is largely redundant -- it must always be `private`. It
-isn't entirely clear why symbol visibility needs to be specified, and it might
-be removed moving forward.
+As another example, consider class `X` defined in `"bits/x.h"`. Here is what
+IWYU would suggest for different cases across mappings and uses:
+
+|                     |       No mapping      | `["X", "full", "<x.h>", ...` | `["X", "fwd-decl", "<xfwd.h>", ...` |
+| ------------------- | --------------------- | ---------------------------- | ----------------------------------- |
+| Full use of `X`     | `#include "bits/x.h"` | `#include <x.h>`             | `#include "bits/x.h"`               |
+| Fwd-decl use of `X` | `class X;`            | `class X;`                   | `#include <xfwd.h>`                 |
+
+If you want the mapping both for complete type info and fwd-decl uses, specify
+the both entries in the mapping file.
+
+If `fwd-decl` mapping is specified, IWYU suggests to replace already present
+forward-declarations with the corresponding headers. For backward compatibility
+with the old mapping file format, `private` is acceptable and is handled as
+`full` use kind.
 
 Unlike `include`, `symbol` directives do not support the `@`-prefixed regex
 syntax in the first entry. Track the [following
@@ -198,9 +211,9 @@ For example;
 
 The rationale for the `ref` directive was to make it easier to compose
 project-specific mappings from a set of library-oriented mapping files. For
-example, IWYU might ship with mapping files for [Boost](http://www.boost.org),
+example, IWYU might ship with mapping files for [Boost](https://www.boost.org),
 the SCL, various C standard libraries, the Windows API, the [Poco
-Library](http://pocoproject.org), etc. Depending on what your specific project
+Library](https://pocoproject.org), etc. Depending on what your specific project
 uses, you could easily create an aggregate mapping file with refs to the
 relevant mappings.
 

@@ -146,6 +146,16 @@ using Providing = IndirectClass;
 // IWYU: IndirectClass is...*indirect.h
 using ProvidingNested = Identity<IndirectClass>;
 
+struct ConstructionFromIndirectClass {
+  // IWYU: IndirectClass needs a declaration
+  ConstructionFromIndirectClass(IndirectClass);
+};
+
+struct AggregateContainingIndirectClass {
+  // IWYU: IndirectClass is...*indirect.h
+  IndirectClass ic;
+};
+
 void ArgumentTypeProvision() {
   Identity<Providing>::Type p1;
   (void)sizeof(p1);
@@ -153,6 +163,10 @@ void ArgumentTypeProvision() {
   Identity<Providing>::Type* p2 = nullptr;
   (void)sizeof(*p2);
   p2->Method();
+  decltype(p1) decltype_provided;
+  (void)sizeof(decltype_provided);
+  ConstructionFromIndirectClass cficp{decltype_provided};
+  AggregateContainingIndirectClass acicp{decltype_provided};
 
   // IWYU: NonProviding is...*typedef_in_template-i1.h
   // IWYU: IndirectClass is...*indirect.h
@@ -167,6 +181,13 @@ void ArgumentTypeProvision() {
   (void)sizeof(*n2);
   // IWYU: IndirectClass is...*indirect.h
   n2->Method();
+  // IWYU: IndirectClass is...*indirect.h
+  decltype(n1) decltype_not_provided;
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(decltype_not_provided);
+  // IWYU: IndirectClass is...*indirect.h
+  ConstructionFromIndirectClass cficnp{decltype_not_provided};
+  AggregateContainingIndirectClass acicnp{decltype_not_provided};
 
   Identity<Providing>::Inner::Type p3;
 
@@ -190,6 +211,8 @@ void ArgumentTypeProvision() {
   // IWYU: NonProvidingNested is...*typedef_in_template-i1.h
   // IWYU: IndirectClass is...*indirect.h
   NonProvidingNested::Type nnt;
+
+  TplProvidingDefArg<>::ArgType tpdaat;
 }
 
 // IWYU: IndirectClass needs a declaration
@@ -265,11 +288,11 @@ tests/cxx/typedef_in_template.cc should add these lines:
 
 tests/cxx/typedef_in_template.cc should remove these lines:
 - #include "tests/cxx/direct.h"  // lines XX-XX
-- #include "tests/cxx/typedef_in_template-d1.h"  // lines XX-XX
 - #include "tests/cxx/typedef_in_template-d2.h"  // lines XX-XX
 
 The full include-list for tests/cxx/typedef_in_template.cc:
 #include "tests/cxx/indirect.h"  // for IndirectClass
+#include "tests/cxx/typedef_in_template-d1.h"  // for TplProvidingDefArg
 #include "tests/cxx/typedef_in_template-i1.h"  // for Class1, NonProviding, NonProvidingNested
 #include "tests/cxx/typedef_in_template-i2.h"  // for Class2, Pair
 

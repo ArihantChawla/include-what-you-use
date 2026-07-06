@@ -23,9 +23,6 @@
 #include "iwyu_port.h"  // for CHECK_
 #include "iwyu_stl_util.h"
 
-// TODO: Clean out pragmas as IWYU improves.
-// IWYU pragma: no_include <iterator>
-
 namespace clang {
 class LangOptions;
 class NamedDecl;
@@ -117,8 +114,7 @@ class FullUseCache {
   // available via GetFullUseType(), which does not have this problem
   // with sugaring.
   static map<const clang::Type*, const clang::Type*> GetPrecomputedResugarMap(
-      const clang::TemplateSpecializationType* tpl_type,
-      const clang::LangOptions&);
+      const clang::Type*, const clang::LangOptions&);
 
  private:
   map<Key, Value> cache_;

@@ -16,6 +16,9 @@
 #include "tests/cxx/template_args-d1.h"
 #include "tests/cxx/template_args-d2.h"
 
+// IWYU: IndirectClass is...*indirect.h
+using IndirectClassProviding = IndirectClass;
+
 // ---------------------------------------------------------------
 
 // IWYU: IndirectClass needs a declaration
@@ -244,6 +247,34 @@ T TplParamRetType() {
 // IWYU: IndirectClass needs a declaration
 IndirectClass& i = TplParamRetType<IndirectClass&>();
 
+template <typename T>
+T TplParamRetTypeNoDef();
+
+// IWYU: IndirectClass needs a declaration
+// IWYU: IndirectClass is...*indirect.h
+auto&& i2 = TplParamRetTypeNoDef<IndirectClass>();
+auto&& i3 = TplParamRetTypeNoDef<IndirectClassProviding>();
+// IWYU: IndirectClass is...*indirect.h
+auto&& i4 = TplParamRetTypeNoDef<IndirectClassNonProviding>();
+
+template <typename T>
+struct TplWithMethodWithoutDef {
+  static T GetT();
+};
+
+// IWYU: IndirectClass is...*indirect.h
+using TplWithMethodWithoutDefProviding = TplWithMethodWithoutDef<IndirectClass>;
+
+// IWYU: IndirectClass needs a declaration
+// IWYU: IndirectClass is...*indirect.h
+auto&& i5 = TplWithMethodWithoutDef<IndirectClass>::GetT();
+auto&& i6 = TplWithMethodWithoutDef<IndirectClassProviding>::GetT();
+// IWYU: IndirectClass is...*indirect.h
+auto&& i7 = TplWithMethodWithoutDef<IndirectClassNonProviding>::GetT();
+auto&& i8 = TplWithMethodWithoutDefProviding::GetT();
+// IWYU: IndirectClass is...*indirect.h
+auto&& i9 = TplWithMethodWithoutDefNonProviding::GetT();
+
 // ---------------------------------------------------------------
 
 template <typename...>
@@ -370,6 +401,223 @@ constexpr auto inner_tpl_size = sizeof(inner_tpl);
 
 // ---------------------------------------------------------------
 
+// Test provision of types by alias template declaration for template
+// instantiation scan. The class template uses dereferenced parameter type so
+// that there is no directly corresponding argument type for resugar_map, and
+// the type provision info should be obtained by GetProvidedTypeComponents.
+
+template <int>
+// IWYU: IndirectClass is...*indirect.h
+using ProvidingPtrAlias = IndirectClass*;
+
+template <typename T>
+struct UsingDereferenced {
+  T ptr;
+  static constexpr auto s = sizeof(*ptr);
+};
+
+UsingDereferenced<ProvidingPtrAlias<1>> udppa;
+// IWYU: IndirectClass is...*indirect.h
+UsingDereferenced<NonProvidingPtrAlias<1>> udnppa;
+
+// ---------------------------------------------------------------
+
+class Class;
+
+template <typename T>
+struct Host {
+  template <typename>
+  struct Nested1 {
+    T t;
+  };
+
+  template <typename U>
+  struct Nested2 {
+    U u;
+  };
+
+  struct Intermediate1 {
+    template <typename>
+    struct Nested {
+      T t;
+    };
+  };
+
+  template <typename U>
+  struct Level1 {
+    template <typename>
+    struct Level2 {
+      T t;
+      U u;
+    };
+  };
+
+  typedef Level1<Class> Level1NonProviding;
+  template <typename>
+  using Level1NonProvidingAlTpl = Level1<Class>;
+
+  template <typename>
+  struct UsesInMethod {
+    static void Fn() {
+      T t;
+    }
+  };
+
+  struct NestedNonTemplate {
+    T t;
+  };
+
+  static void UseNestedNonTemplate() {
+    (void)sizeof(NestedNonTemplate);
+  }
+};
+
+// IWYU: IndirectClass needs a declaration
+struct Derived : Host<IndirectClass> {
+  // IWYU: IndirectClass needs a declaration
+  using Host<IndirectClass>::NestedNonTemplate;
+};
+
+// IWYU: IndirectClass is...*indirect.h
+using HostProvidingAlias = Host<IndirectClass>;
+
+template <typename>
+// IWYU: IndirectClass is...*indirect.h
+using HostProvidingAliasTpl = Host<IndirectClass>;
+
+using NestedWithClass = Host<Class>::Intermediate1;
+
+template <typename T>
+using AliasTplToTypedef = typename Host<T>::Level1NonProviding;
+
+void TestMultiLevelArgs() {
+  // IWYU: IndirectClass needs a declaration
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(Host<IndirectClass>::Nested1<int>);
+  // IWYU: IndirectClass needs a declaration
+  Host<IndirectClass>::Nested1<int>* nested11;
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(*nested11);
+
+  // IWYU: IndirectClass needs a declaration
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(Host<int>::Nested2<IndirectClass>);
+  // IWYU: IndirectClass needs a declaration
+  Host<int>::Nested2<IndirectClass>* nested2;
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(*nested2);
+
+  // IWYU: IndirectClass needs a declaration
+  Host<IndirectClass>::Intermediate1::Nested<int>* inner_nested;
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(*inner_nested);
+
+  // IWYU: IndirectClass needs a declaration
+  Host<int>::Level1<IndirectClass>::Level2<int>* level2;
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(*level2);
+
+  HostProvidingAlias::Nested1<int> hpan1;
+  // IWYU: IndirectClass is...*indirect.h
+  HostNonProvidingAlias::Nested1<int> hnpan1;
+
+  HostProvidingAliasTpl<int>::Nested1<int> hpatn1;
+  // IWYU: IndirectClass is...*indirect.h
+  HostNonProvidingAliasTpl<int>::Nested1<int> hnpatn1;
+
+  // IWYU: Class is...*-i1.h
+  (void)sizeof(NestedWithClass::Nested<int>);
+  NestedWithClass::Nested<int>* nested12;
+  // IWYU: Class is...*-i1.h
+  (void)sizeof(*nested12);
+
+  // IWYU: IndirectClass needs a declaration
+  // IWYU: Class is...*-i1.h
+  // IWYU: IndirectClass is...*indirect.h
+  Host<IndirectClass>::Level1NonProviding::Level2<int> inner_nested2;
+  // IWYU: IndirectClass needs a declaration
+  Host<IndirectClass>::Level1NonProviding::Level2<int>* p_inner_nested2;
+  // IWYU: Class is...*-i1.h
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(*p_inner_nested2);
+  // IWYU: IndirectClass needs a declaration
+  // IWYU: Class is...*-i1.h
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(Host<IndirectClass>::Level1NonProvidingAlTpl<int>::Level2<int>);
+
+  // IWYU: IndirectClass needs a declaration
+  // IWYU: Class is...*-i1.h
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(AliasTplToTypedef<IndirectClass>::Level2<int>);
+
+  Host<Class>::Intermediate1 intermediate1;
+  // IWYU: Class is...*-i1.h
+  decltype(intermediate1)::Nested<int> inner_nested3;
+  using Intermediate1AliasNonProviding = decltype(intermediate1);
+  // IWYU: Class is...*-i1.h
+  Intermediate1AliasNonProviding::Nested<int> inner_nested4;
+  // IWYU: IndirectClass needs a declaration
+  Host<IndirectClass>::UsesInMethod<int> uim;
+  // IWYU: IndirectClass is...*indirect.h
+  decltype(uim)::Fn();
+
+  // IWYU: IndirectClass needs a declaration
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(Host<IndirectClass>::NestedNonTemplate);
+  (void)sizeof(HostProvidingAlias::NestedNonTemplate);
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(HostNonProvidingAlias::NestedNonTemplate);
+  // IWYU: IndirectClass needs a declaration
+  Host<IndirectClass>::NestedNonTemplate* nnt;
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(*nnt);
+  // IWYU: IndirectClass needs a declaration
+  // IWYU: IndirectClass is...*indirect.h
+  Host<IndirectClass>::UseNestedNonTemplate();
+  // Test using-type.
+  // IWYU: IndirectClass is...*indirect.h
+  (void)sizeof(Derived::NestedNonTemplate);
+}
+
+// ---------------------------------------------------------------
+
+struct ContainsIndirectClass {
+  // IWYU: IndirectClass is...*indirect.h
+  IndirectClass ic;
+};
+
+template <typename>
+class ContainsIndirectClassIndirectly {
+  ContainsIndirectClass cic;
+};
+
+void TestNonTemplatesInsideTemplate() {
+  // IndirectClass definition should not be reported here because
+  // ContainsIndirectClass should already provide it.
+  // IWYU: IndirectClass needs a declaration
+  (void)sizeof(ContainsIndirectClassIndirectly<IndirectClass>);
+  // IWYU: IndirectClass needs a declaration
+  ContainsIndirectClassIndirectly<IndirectClass> ciciic;
+}
+
+// ---------------------------------------------------------------
+
+template <int>
+class IntArgTpl {};
+
+// IWYU: GetInt() is...*-i1.h
+extern IntArgTpl<GetInt()> iat1;
+
+// IWYU: GetInt() is...*-i1.h
+IntArgTpl<GetInt()> GetIntArgTpl();
+
+// No need to report GetInt here: it should be reported where the template
+// arguments are specified.
+auto iat_size = sizeof(iat1);
+auto iat2 = GetIntArgTpl();
+
+// ---------------------------------------------------------------
+
 /**** IWYU_SUMMARY
 
 tests/cxx/template_args.cc should add these lines:
@@ -378,12 +626,13 @@ tests/cxx/template_args.cc should add these lines:
 
 tests/cxx/template_args.cc should remove these lines:
 - #include "tests/cxx/direct.h"  // lines XX-XX
+- class Class;  // lines XX-XX
 
 The full include-list for tests/cxx/template_args.cc:
 #include "tests/cxx/indirect.h"  // for IndirectClass, IndirectTemplate
 #include "tests/cxx/template_args-d1.h"  // for ProvidingAlias
-#include "tests/cxx/template_args-d2.h"  // for NonProvidingAlias, NonProvidingFunctionAlias1, NonProvidingFunctionAlias2
-#include "tests/cxx/template_args-i1.h"  // for TplHost, TplInI1
+#include "tests/cxx/template_args-d2.h"  // for HostNonProvidingAlias, HostNonProvidingAliasTpl, IndirectClassNonProviding, NonProvidingAlias, NonProvidingFunctionAlias1, NonProvidingFunctionAlias2, NonProvidingPtrAlias, TplWithMethodWithoutDefNonProviding
+#include "tests/cxx/template_args-i1.h"  // for Class, GetInt, TplHost, TplInI1
 template <typename F> struct FunctionStruct;  // lines XX-XX
 
 ***** IWYU_SUMMARY */

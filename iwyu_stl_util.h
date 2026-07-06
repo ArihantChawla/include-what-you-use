@@ -12,9 +12,7 @@
 #ifndef INCLUDE_WHAT_YOU_USE_IWYU_STL_UTIL_H_
 #define INCLUDE_WHAT_YOU_USE_IWYU_STL_UTIL_H_
 
-// TODO: IWYU can't see the use of std::find in uninstantiated template.
-#include <algorithm>  // IWYU pragma: keep
-
+#include <algorithm>                    // for find
 #include <map>                          // for map, multimap
 #include <set>                          // for set
 #include <vector>                       // for vector
@@ -112,12 +110,13 @@ void Extend(TargetContainer* target, const SourceContainer& source) {
   target->insert(target->end(), source.begin(), source.end());
 }
 
-// Returns the union of the two given sets.
-template <typename T>
-set<T> Union(const set<T>& lhs, const set<T>& rhs) {
-  set<T> retval(lhs);
-  InsertAllInto(rhs, &retval);
-  return retval;
+// Returns the union of a number of sets.
+template <typename T, typename... Sets>
+set<T> Union(set<T> first, Sets... rest) {
+  // A fold expression to apply first.merge over all pack elements, successively
+  // merging them into first.
+  (first.merge(rest), ...);
+  return first;
 }
 
 // Returns a vector v with all duplicates removed, but order otherwise

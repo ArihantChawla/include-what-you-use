@@ -16,8 +16,10 @@
 #include <map>                          // for map, map<>::mapped_type, etc
 #include <memory>
 #include <numeric>                      // for accumulate
+#include <optional>
 #include <string>                       // for string, basic_string, etc
 #include <system_error>                 // for error_code
+#include <type_traits>
 #include <utility>                      // for pair, make_pair
 #include <vector>                       // for vector, vector<>::iterator
 
@@ -25,6 +27,7 @@
 #include "clang/Basic/LangOptions.h"
 #include "clang/Tooling/Inclusions/StandardLibrary.h"
 #include "iwyu_ast_util.h"
+#include "iwyu_globals.h"
 #include "iwyu_location_util.h"
 #include "iwyu_path_util.h"
 #include "iwyu_port.h"
@@ -45,9 +48,6 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/YAMLParser.h"
 
-// TODO: Clean out pragmas as IWYU improves.
-// IWYU pragma: no_include <iterator>
-
 using clang::NamedDecl;
 using clang::OptionalFileEntryRef;
 using llvm::MemoryBuffer;
@@ -63,8 +63,10 @@ using llvm::yaml::SequenceNode;
 using llvm::yaml::Stream;
 using llvm::yaml::document_iterator;
 using std::find;
+using std::is_same_v;
 using std::make_pair;
 using std::map;
+using std::optional;
 using std::pair;
 using std::string;
 using std::unique_ptr;
@@ -77,9 +79,16 @@ namespace include_what_you_use {
 // to think about it is that map_to "re-exports" all the
 // symbols from map_from.
 struct IncludeMapEntry {      // A POD so we can make the input static
-  const char* map_from;       // A quoted-include or a symbol name
+  const char* map_from;       // A quoted-include name
   IncludeVisibility from_visibility;
   const char* map_to;         // A quoted-include
+  IncludeVisibility to_visibility;
+};
+
+struct SymbolMapEntry {
+  const char* map_from;  // A symbol name.
+  UseKind use_kind;
+  const char* map_to;  // A quoted-include.
   IncludeVisibility to_visibility;
 };
 
@@ -89,7 +98,7 @@ namespace {
 // loosely based on GCC 4.4's libc and libstdc++.
 
 // Symbol -> include mappings for GNU libc
-const IncludeMapEntry libc_symbol_map[] = {
+const SymbolMapEntry libc_symbol_map[] = {
   // For library symbols that can be defined in more than one header
   // file, maps from symbol-name to legitimate header files.
   // This list was generated via
@@ -101,269 +110,266 @@ const IncludeMapEntry libc_symbol_map[] = {
   // equivalents.
   // In each case, I ordered them so <sys/types.h> was first, if it was
   // an option for this type.  That's the preferred #include all else
-  // equal.  The visibility on the symbol-name is ignored; by convention
-  // we always set it to kPrivate.
-  { "_POSIX_VDISABLE", kPrivate, "<unistd.h>", kPublic },
-  { "abort", kPrivate, "<stdlib.h>", kPublic },
-  { "aiocb", kPrivate, "<aio.h>", kPublic },
-  { "blkcnt_t", kPrivate, "<sys/types.h>", kPublic },
-  { "blksize_t", kPrivate, "<sys/types.h>", kPublic },
-  { "cc_t", kPrivate, "<termios.h>", kPublic },
-  { "clock_t", kPrivate, "<time.h>", kPublic },
-  { "clock_t", kPrivate, "<sys/types.h>", kPublic },
-  { "clockid_t", kPrivate, "<sys/types.h>", kPublic },
-  { "ctermid", kPrivate, "<stdio.h>", kPublic },
-  { "daddr_t", kPrivate, "<sys/types.h>", kPublic },
-  { "dev_t", kPrivate, "<sys/types.h>", kPublic },
-  { "div_t", kPrivate, "<stdlib.h>", kPublic },
-  { "double_t", kPrivate, "<math.h>", kPublic },
-  { "error_t", kPrivate, "<errno.h>", kPublic },
-  { "error_t", kPrivate, "<argp.h>", kPublic },
-  { "error_t", kPrivate, "<argz.h>", kPublic },
-  { "FD_CLR", kPrivate, "<sys/select.h>", kPublic },
-  { "FD_ISSET", kPrivate, "<sys/select.h>", kPublic },
-  { "FD_SET", kPrivate, "<sys/select.h>", kPublic },
-  { "fd_set", kPrivate, "<sys/select.h>", kPublic },
-  { "FD_SETSIZE", kPrivate, "<sys/select.h>", kPublic },
-  { "FD_ZERO", kPrivate, "<sys/select.h>", kPublic },
-  { "fenv_t", kPrivate, "<fenv.h>", kPublic },
-  { "fexcept_t", kPrivate, "<fenv.h>", kPublic },
-  { "FILE", kPrivate, "<stdio.h>", kPublic },
-  { "float_t", kPrivate, "<math.h>", kPublic },
-  { "fsblkcnt_t", kPrivate, "<sys/types.h>", kPublic },
-  { "fsfilcnt_t", kPrivate, "<sys/types.h>", kPublic },
-  { "getopt", kPrivate, "<unistd.h>", kPublic },
-  { "gid_t", kPrivate, "<sys/types.h>", kPublic },
-  { "htonl", kPrivate, "<arpa/inet.h>", kPublic },
-  { "htons", kPrivate, "<arpa/inet.h>", kPublic },
-  { "in_addr_t", kPrivate, "<netinet/in.h>", kPublic },
-  { "in_port_t", kPrivate, "<netinet/in.h>", kPublic },
-  { "id_t", kPrivate, "<sys/types.h>", kPublic },
-  { "imaxdiv_t", kPrivate, "<inttypes.h>", kPublic },
-  { "intmax_t", kPrivate, "<stdint.h>", kPublic },
-  { "uintmax_t", kPrivate, "<stdint.h>", kPublic },
-  { "ino64_t", kPrivate, "<sys/types.h>", kPublic },
-  { "ino_t", kPrivate, "<sys/types.h>", kPublic },
-  { "int8_t", kPrivate, "<stdint.h>", kPublic },
-  { "int16_t", kPrivate, "<stdint.h>", kPublic },
-  { "int32_t", kPrivate, "<stdint.h>", kPublic },
-  { "int64_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_fast8_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_fast16_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_fast32_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_fast64_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_least8_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_least16_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_least32_t", kPrivate, "<stdint.h>", kPublic },
-  { "int_least64_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint8_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint16_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint32_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint64_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_fast8_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_fast16_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_fast32_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_fast64_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_least8_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_least16_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_least32_t", kPrivate, "<stdint.h>", kPublic },
-  { "uint_least64_t", kPrivate, "<stdint.h>", kPublic },
-  { "intptr_t", kPrivate, "<stdint.h>", kPublic },
-  { "uintptr_t", kPrivate, "<stdint.h>", kPublic },
-  { "iovec", kPrivate, "<sys/uio.h>", kPublic },
-  { "itimerspec", kPrivate, "<time.h>", kPublic },
-  { "key_t", kPrivate, "<sys/types.h>", kPublic },
-  { "L_ctermid", kPrivate, "<stdio.h>", kPublic },
-  { "lconv", kPrivate, "<locale.h>", kPublic },
-  { "ldiv_t", kPrivate, "<stdlib.h>", kPublic },
-  { "lldiv_t", kPrivate, "<stdlib.h>", kPublic },
-  { "locale_t", kPrivate, "<locale.h>", kPublic },
-  { "max_align_t", kPrivate, "<stddef.h>", kPublic },
-  { "mbstate_t", kPrivate, "<wchar.h>", kPublic },
-  { "mcontext_t", kPrivate, "<ucontext.h>", kPublic },
-  { "mode_t", kPrivate, "<sys/types.h>", kPublic },
-  { "nl_item", kPrivate, "<nl_types.h>", kPublic },
-  { "nlink_t", kPrivate, "<sys/types.h>", kPublic },
-  { "ntohl", kPrivate, "<arpa/inet.h>", kPublic },
-  { "ntohs", kPrivate, "<arpa/inet.h>", kPublic },
-  { "O_DSYNC", kPrivate, "<fcntl.h>", kPublic },
-  { "O_SYNC", kPrivate, "<fcntl.h>", kPublic },
-  { "off64_t", kPrivate, "<sys/types.h>", kPublic },
-  { "off_t", kPrivate, "<sys/types.h>", kPublic },
-  { "optarg", kPrivate, "<unistd.h>", kPublic },
-  { "opterr", kPrivate, "<unistd.h>", kPublic },
-  { "optind", kPrivate, "<unistd.h>", kPublic },
-  { "optopt", kPrivate, "<unistd.h>", kPublic },
-  { "pid_t", kPrivate, "<sys/types.h>", kPublic },
-  { "posix_memalign", kPrivate, "<stdlib.h>", kPublic },
-  { "printf", kPrivate, "<stdio.h>", kPublic },
-  { "pthread_attr_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_cond_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_condattr_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_key_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_mutex_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_mutexattr_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_once_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_rwlock_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_rwlockattr_t", kPrivate, "<pthread.h>", kPublic },
-  { "pthread_t", kPrivate, "<pthread.h>", kPublic },
-  { "ptrdiff_t", kPrivate, "<stddef.h>", kPublic },
-  { "regex_t", kPrivate, "<regex.h>", kPublic },
-  { "regmatch_t", kPrivate, "<regex.h>", kPublic },
-  { "regoff_t", kPrivate, "<regex.h>", kPublic },
-  { "S_IFBLK", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IFCHR", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IFDIR", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IFIFO", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IFLNK", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IFMT", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IFREG", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IFSOCK", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IRGRP", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IROTH", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IRUSR", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IRWXG", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IRWXO", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IRWXU", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_ISGID", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_ISUID", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_ISVTX", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IWGRP", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IWOTH", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IWUSR", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IXGRP", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IXOTH", kPrivate, "<sys/stat.h>", kPublic },
-  { "S_IXUSR", kPrivate, "<sys/stat.h>", kPublic },
-  { "sa_family_t", kPrivate, "<sys/socket.h>", kPublic },
-  { "SCHED_FIFO", kPrivate, "<sched.h>", kPublic },
-  { "SCHED_OTHER", kPrivate, "<sched.h>", kPublic },
-  { "SCHED_RR", kPrivate, "<sched.h>", kPublic },
-  { "SEEK_CUR", kPrivate, "<stdio.h>", kPublic },
-  { "SEEK_END", kPrivate, "<stdio.h>", kPublic },
-  { "SEEK_SET", kPrivate, "<stdio.h>", kPublic },
-  { "sig_atomic_t", kPrivate, "<signal.h>", kPublic },
-  { "sigevent", kPrivate, "<signal.h>", kPublic },
-  { "siginfo_t", kPrivate, "<signal.h>", kPublic },
-  { "sigset_t", kPrivate, "<signal.h>", kPublic },
-  { "sigval", kPrivate, "<signal.h>", kPublic },
-  { "sockaddr", kPrivate, "<sys/socket.h>", kPublic },
-  { "socklen_t", kPrivate, "<sys/socket.h>", kPublic },
-  { "ssize_t", kPrivate, "<sys/types.h>", kPublic },
-  { "stack_t", kPrivate, "<signal.h>", kPublic },
-  { "stat", kPrivate, "<sys/stat.h>", kPublic },
-  { "suseconds_t", kPrivate, "<sys/types.h>", kPublic },
-  { "time_t", kPrivate, "<time.h>", kPublic },
-  { "time_t", kPrivate, "<sys/types.h>", kPublic },
-  { "timer_t", kPrivate, "<sys/types.h>", kPublic },
-  { "timespec", kPrivate, "<time.h>", kPublic },
-  { "timeval", kPrivate, "<sys/time.h>", kPublic },  // 'canonical' location for timeval
-  { "timeval", kPrivate, "<sys/resource.h>", kPublic },
-  { "timeval", kPrivate, "<sys/select.h>", kPublic },
-  { "timeval", kPrivate, "<utmpx.h>", kPublic },
-  { "tm", kPrivate, "<time.h>", kPublic },
-  { "u_char", kPrivate, "<sys/types.h>", kPublic },
-  { "ucontext_t", kPrivate, "<ucontext.h>", kPublic },
-  { "uid_t", kPrivate, "<sys/types.h>", kPublic },
-  { "useconds_t", kPrivate, "<sys/types.h>", kPublic },
-  { "wchar_t", kPrivate, "<stddef.h>", kPublic },
-  { "wctrans_t", kPrivate, "<wctype.h>", kPublic },
-  { "wctype_t", kPrivate, "<wctype.h>", kPublic },
-  { "winsize", kPrivate, "<termios.h>", kPublic },
-  { "wint_t", kPrivate, "<wchar.h>", kPublic },
+  // equal.
+  { "_POSIX_VDISABLE", UseKind::Full, "<unistd.h>", kPublic },
+  { "abort", UseKind::Full, "<stdlib.h>", kPublic },
+  { "aiocb", UseKind::Full, "<aio.h>", kPublic },
+  { "blkcnt_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "blksize_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "cc_t", UseKind::Full, "<termios.h>", kPublic },
+  { "clock_t", UseKind::Full, "<time.h>", kPublic },
+  { "clock_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "clockid_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "ctermid", UseKind::Full, "<stdio.h>", kPublic },
+  { "daddr_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "dev_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "div_t", UseKind::Full, "<stdlib.h>", kPublic },
+  { "double_t", UseKind::Full, "<math.h>", kPublic },
+  { "error_t", UseKind::Full, "<errno.h>", kPublic },
+  { "error_t", UseKind::Full, "<argp.h>", kPublic },
+  { "error_t", UseKind::Full, "<argz.h>", kPublic },
+  { "FD_CLR", UseKind::Full, "<sys/select.h>", kPublic },
+  { "FD_ISSET", UseKind::Full, "<sys/select.h>", kPublic },
+  { "FD_SET", UseKind::Full, "<sys/select.h>", kPublic },
+  { "fd_set", UseKind::Full, "<sys/select.h>", kPublic },
+  { "FD_SETSIZE", UseKind::Full, "<sys/select.h>", kPublic },
+  { "FD_ZERO", UseKind::Full, "<sys/select.h>", kPublic },
+  { "fenv_t", UseKind::Full, "<fenv.h>", kPublic },
+  { "fexcept_t", UseKind::Full, "<fenv.h>", kPublic },
+  { "FILE", UseKind::Full, "<stdio.h>", kPublic },
+  { "float_t", UseKind::Full, "<math.h>", kPublic },
+  { "fsblkcnt_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "fsfilcnt_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "getopt", UseKind::Full, "<unistd.h>", kPublic },
+  { "gid_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "htonl", UseKind::Full, "<arpa/inet.h>", kPublic },
+  { "htons", UseKind::Full, "<arpa/inet.h>", kPublic },
+  { "in_addr_t", UseKind::Full, "<netinet/in.h>", kPublic },
+  { "in_port_t", UseKind::Full, "<netinet/in.h>", kPublic },
+  { "id_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "imaxdiv_t", UseKind::Full, "<inttypes.h>", kPublic },
+  { "intmax_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uintmax_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "ino64_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "ino_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "int8_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int16_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int32_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int64_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_fast8_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_fast16_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_fast32_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_fast64_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_least8_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_least16_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_least32_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "int_least64_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint8_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint16_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint32_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint64_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_fast8_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_fast16_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_fast32_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_fast64_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_least8_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_least16_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_least32_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uint_least64_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "intptr_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "uintptr_t", UseKind::Full, "<stdint.h>", kPublic },
+  { "iovec", UseKind::Full, "<sys/uio.h>", kPublic },
+  { "itimerspec", UseKind::Full, "<time.h>", kPublic },
+  { "key_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "L_ctermid", UseKind::Full, "<stdio.h>", kPublic },
+  { "lconv", UseKind::Full, "<locale.h>", kPublic },
+  { "ldiv_t", UseKind::Full, "<stdlib.h>", kPublic },
+  { "lldiv_t", UseKind::Full, "<stdlib.h>", kPublic },
+  { "locale_t", UseKind::Full, "<locale.h>", kPublic },
+  { "max_align_t", UseKind::Full, "<stddef.h>", kPublic },
+  { "mbstate_t", UseKind::Full, "<wchar.h>", kPublic },
+  { "mcontext_t", UseKind::Full, "<ucontext.h>", kPublic },
+  { "mode_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "nl_item", UseKind::Full, "<nl_types.h>", kPublic },
+  { "nlink_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "ntohl", UseKind::Full, "<arpa/inet.h>", kPublic },
+  { "ntohs", UseKind::Full, "<arpa/inet.h>", kPublic },
+  { "O_DSYNC", UseKind::Full, "<fcntl.h>", kPublic },
+  { "O_SYNC", UseKind::Full, "<fcntl.h>", kPublic },
+  { "off64_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "off_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "optarg", UseKind::Full, "<unistd.h>", kPublic },
+  { "opterr", UseKind::Full, "<unistd.h>", kPublic },
+  { "optind", UseKind::Full, "<unistd.h>", kPublic },
+  { "optopt", UseKind::Full, "<unistd.h>", kPublic },
+  { "pid_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "posix_memalign", UseKind::Full, "<stdlib.h>", kPublic },
+  { "printf", UseKind::Full, "<stdio.h>", kPublic },
+  { "pthread_attr_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_cond_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_condattr_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_key_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_mutex_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_mutexattr_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_once_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_rwlock_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_rwlockattr_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "pthread_t", UseKind::Full, "<pthread.h>", kPublic },
+  { "ptrdiff_t", UseKind::Full, "<stddef.h>", kPublic },
+  { "regex_t", UseKind::Full, "<regex.h>", kPublic },
+  { "regmatch_t", UseKind::Full, "<regex.h>", kPublic },
+  { "regoff_t", UseKind::Full, "<regex.h>", kPublic },
+  { "S_IFBLK", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IFCHR", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IFDIR", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IFIFO", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IFLNK", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IFMT", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IFREG", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IFSOCK", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IRGRP", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IROTH", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IRUSR", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IRWXG", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IRWXO", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IRWXU", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_ISGID", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_ISUID", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_ISVTX", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IWGRP", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IWOTH", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IWUSR", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IXGRP", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IXOTH", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "S_IXUSR", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "sa_family_t", UseKind::Full, "<sys/socket.h>", kPublic },
+  { "SCHED_FIFO", UseKind::Full, "<sched.h>", kPublic },
+  { "SCHED_OTHER", UseKind::Full, "<sched.h>", kPublic },
+  { "SCHED_RR", UseKind::Full, "<sched.h>", kPublic },
+  { "SEEK_CUR", UseKind::Full, "<stdio.h>", kPublic },
+  { "SEEK_END", UseKind::Full, "<stdio.h>", kPublic },
+  { "SEEK_SET", UseKind::Full, "<stdio.h>", kPublic },
+  { "sig_atomic_t", UseKind::Full, "<signal.h>", kPublic },
+  { "sigevent", UseKind::Full, "<signal.h>", kPublic },
+  { "siginfo_t", UseKind::Full, "<signal.h>", kPublic },
+  { "sigset_t", UseKind::Full, "<signal.h>", kPublic },
+  { "sigval", UseKind::Full, "<signal.h>", kPublic },
+  { "sockaddr", UseKind::Full, "<sys/socket.h>", kPublic },
+  { "socklen_t", UseKind::Full, "<sys/socket.h>", kPublic },
+  { "ssize_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "stack_t", UseKind::Full, "<signal.h>", kPublic },
+  { "stat", UseKind::Full, "<sys/stat.h>", kPublic },
+  { "suseconds_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "time_t", UseKind::Full, "<time.h>", kPublic },
+  { "time_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "timer_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "timespec", UseKind::Full, "<time.h>", kPublic },
+  { "timeval", UseKind::Full, "<sys/time.h>", kPublic },  // 'canonical' location for timeval
+  { "timeval", UseKind::Full, "<sys/resource.h>", kPublic },
+  { "timeval", UseKind::Full, "<sys/select.h>", kPublic },
+  { "timeval", UseKind::Full, "<utmpx.h>", kPublic },
+  { "tm", UseKind::Full, "<time.h>", kPublic },
+  { "u_char", UseKind::Full, "<sys/types.h>", kPublic },
+  { "ucontext_t", UseKind::Full, "<ucontext.h>", kPublic },
+  { "uid_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "useconds_t", UseKind::Full, "<sys/types.h>", kPublic },
+  { "wchar_t", UseKind::Full, "<stddef.h>", kPublic },
+  { "wctrans_t", UseKind::Full, "<wctype.h>", kPublic },
+  { "wctype_t", UseKind::Full, "<wctype.h>", kPublic },
+  { "winsize", UseKind::Full, "<termios.h>", kPublic },
+  { "wint_t", UseKind::Full, "<wchar.h>", kPublic },
   // It is unspecified if the cname headers provide ::size_t.
   // <locale.h> is the one header which defines NULL but not size_t.
-  { "size_t", kPrivate, "<stddef.h>", kPublic },  // 'canonical' location for size_t
-  { "size_t", kPrivate, "<signal.h>", kPublic },
-  { "size_t", kPrivate, "<stdio.h>", kPublic },
-  { "size_t", kPrivate, "<stdlib.h>", kPublic },
-  { "size_t", kPrivate, "<string.h>", kPublic },
-  { "size_t", kPrivate, "<time.h>", kPublic },
-  { "size_t", kPrivate, "<uchar.h>", kPublic },
-  { "size_t", kPrivate, "<wchar.h>", kPublic },
+  { "size_t", UseKind::Full, "<stddef.h>", kPublic },  // 'canonical' location for size_t
+  { "size_t", UseKind::Full, "<signal.h>", kPublic },
+  { "size_t", UseKind::Full, "<stdio.h>", kPublic },
+  { "size_t", UseKind::Full, "<stdlib.h>", kPublic },
+  { "size_t", UseKind::Full, "<string.h>", kPublic },
+  { "size_t", UseKind::Full, "<time.h>", kPublic },
+  { "size_t", UseKind::Full, "<uchar.h>", kPublic },
+  { "size_t", UseKind::Full, "<wchar.h>", kPublic },
   // Macros that can be defined in more than one file, don't have the
   // same __foo_defined guard that other types do, so the grep above
   // doesn't discover them.  Until I figure out a better way, I just
   // add them in by hand as I discover them.
-  { "EOF", kPrivate, "<stdio.h>", kPublic },
-  { "FILE", kPrivate, "<stdio.h>", kPublic },
-  { "IBSHIFT", kPrivate, "<asm/termbits.h>", kPublic },
-  { "MAP_POPULATE", kPrivate, "<sys/mman.h>", kPublic },
-  { "MAP_POPULATE", kPrivate, "<linux/mman.h>", kPublic },
-  { "MAP_STACK", kPrivate, "<sys/mman.h>", kPublic },
-  { "MAP_STACK", kPrivate, "<linux/mman.h>", kPublic },
-  { "MAXHOSTNAMELEN", kPrivate, "<sys/param.h>", kPublic },
-  { "MAXHOSTNAMELEN", kPrivate, "<protocols/timed.h>", kPublic },
-  { "SIGABRT", kPrivate, "<signal.h>", kPublic },
-  { "SIGCHLD", kPrivate, "<signal.h>", kPublic },
-  { "va_arg", kPrivate, "<stdarg.h>", kPublic },
-  { "va_copy", kPrivate, "<stdarg.h>", kPublic },
-  { "va_end", kPrivate, "<stdarg.h>", kPublic },
-  { "va_list", kPrivate, "<stdarg.h>", kPublic },
-  { "va_start", kPrivate, "<stdarg.h>", kPublic },
-  { "WEOF", kPrivate, "<wchar.h>", kPublic },
+  { "EOF", UseKind::Full, "<stdio.h>", kPublic },
+  { "FILE", UseKind::Full, "<stdio.h>", kPublic },
+  { "IBSHIFT", UseKind::Full, "<asm/termbits.h>", kPublic },
+  { "MAP_POPULATE", UseKind::Full, "<sys/mman.h>", kPublic },
+  { "MAP_POPULATE", UseKind::Full, "<linux/mman.h>", kPublic },
+  { "MAP_STACK", UseKind::Full, "<sys/mman.h>", kPublic },
+  { "MAP_STACK", UseKind::Full, "<linux/mman.h>", kPublic },
+  { "MAXHOSTNAMELEN", UseKind::Full, "<sys/param.h>", kPublic },
+  { "MAXHOSTNAMELEN", UseKind::Full, "<protocols/timed.h>", kPublic },
+  { "SIGABRT", UseKind::Full, "<signal.h>", kPublic },
+  { "SIGCHLD", UseKind::Full, "<signal.h>", kPublic },
+  { "va_arg", UseKind::Full, "<stdarg.h>", kPublic },
+  { "va_copy", UseKind::Full, "<stdarg.h>", kPublic },
+  { "va_end", UseKind::Full, "<stdarg.h>", kPublic },
+  { "va_list", UseKind::Full, "<stdarg.h>", kPublic },
+  { "va_start", UseKind::Full, "<stdarg.h>", kPublic },
+  { "WEOF", UseKind::Full, "<wchar.h>", kPublic },
   // These are symbols that could be defined in either stdlib.h or
   // malloc.h, but we always want the stdlib location.
-  { "malloc", kPrivate, "<stdlib.h>", kPublic },
-  { "calloc", kPrivate, "<stdlib.h>", kPublic },
-  { "realloc", kPrivate, "<stdlib.h>", kPublic },
-  { "free", kPrivate, "<stdlib.h>", kPublic },
+  { "malloc", UseKind::Full, "<stdlib.h>", kPublic },
+  { "calloc", UseKind::Full, "<stdlib.h>", kPublic },
+  { "realloc", UseKind::Full, "<stdlib.h>", kPublic },
+  { "free", UseKind::Full, "<stdlib.h>", kPublic },
   // Entries for NULL
-  { "NULL", kPrivate, "<stddef.h>", kPublic },  // 'canonical' location for NULL
-  { "NULL", kPrivate, "<clocale>", kPublic },
-  { "NULL", kPrivate, "<cstddef>", kPublic },
-  { "NULL", kPrivate, "<cstdio>", kPublic },
-  { "NULL", kPrivate, "<cstdlib>", kPublic },
-  { "NULL", kPrivate, "<cstring>", kPublic },
-  { "NULL", kPrivate, "<ctime>", kPublic },
-  { "NULL", kPrivate, "<cwchar>", kPublic },
-  { "NULL", kPrivate, "<locale.h>", kPublic },
-  { "NULL", kPrivate, "<stdio.h>", kPublic },
-  { "NULL", kPrivate, "<stdlib.h>", kPublic },
-  { "NULL", kPrivate, "<string.h>", kPublic },
-  { "NULL", kPrivate, "<time.h>", kPublic },
-  { "NULL", kPrivate, "<wchar.h>", kPublic },
-  { "offsetof", kPrivate, "<stddef.h>", kPublic },
+  { "NULL", UseKind::Full, "<stddef.h>", kPublic },  // 'canonical' location for NULL
+  { "NULL", UseKind::Full, "<clocale>", kPublic },
+  { "NULL", UseKind::Full, "<cstddef>", kPublic },
+  { "NULL", UseKind::Full, "<cstdio>", kPublic },
+  { "NULL", UseKind::Full, "<cstdlib>", kPublic },
+  { "NULL", UseKind::Full, "<cstring>", kPublic },
+  { "NULL", UseKind::Full, "<ctime>", kPublic },
+  { "NULL", UseKind::Full, "<cwchar>", kPublic },
+  { "NULL", UseKind::Full, "<locale.h>", kPublic },
+  { "NULL", UseKind::Full, "<stdio.h>", kPublic },
+  { "NULL", UseKind::Full, "<stdlib.h>", kPublic },
+  { "NULL", UseKind::Full, "<string.h>", kPublic },
+  { "NULL", UseKind::Full, "<time.h>", kPublic },
+  { "NULL", UseKind::Full, "<wchar.h>", kPublic },
+  { "offsetof", UseKind::Full, "<stddef.h>", kPublic },
   // Auxiliary vector entry types.
-  { "AT_BASE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_BASE_PLATFORM", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_CLKTCK", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_DCACHEBSIZE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_EGID", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_ENTRY", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_EUID", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_EXECFD", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_EXECFN", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_FLAGS", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_FPUCW", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_GID", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_HWCAP", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_HWCAP2", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_ICACHEBSIZE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L1D_CACHEGEOMETRY", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L1D_CACHESIZE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L1I_CACHEGEOMETRY", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L1I_CACHESIZE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L2_CACHEGEOMETRY", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L2_CACHESIZE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L3_CACHEGEOMETRY", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_L3_CACHESIZE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_PAGESZ", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_PHDR", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_PHENT", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_PHNUM", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_PLATFORM", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_RANDOM", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_SECURE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_SYSINFO", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_SYSINFO_EHDR", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_UCACHEBSIZE", kPrivate, "<sys/auxv.h>", kPublic },
-  { "AT_UID", kPrivate, "<sys/auxv.h>", kPublic },
+  { "AT_BASE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_BASE_PLATFORM", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_CLKTCK", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_DCACHEBSIZE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_EGID", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_ENTRY", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_EUID", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_EXECFD", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_EXECFN", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_FLAGS", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_FPUCW", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_GID", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_HWCAP", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_HWCAP2", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_ICACHEBSIZE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L1D_CACHEGEOMETRY", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L1D_CACHESIZE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L1I_CACHEGEOMETRY", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L1I_CACHESIZE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L2_CACHEGEOMETRY", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L2_CACHESIZE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L3_CACHEGEOMETRY", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_L3_CACHESIZE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_PAGESZ", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_PHDR", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_PHENT", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_PHNUM", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_PLATFORM", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_RANDOM", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_SECURE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_SYSINFO", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_SYSINFO_EHDR", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_UCACHEBSIZE", UseKind::Full, "<sys/auxv.h>", kPublic },
+  { "AT_UID", UseKind::Full, "<sys/auxv.h>", kPublic },
 };
 
-const IncludeMapEntry stdlib_cxx_symbol_map[] = {
+const SymbolMapEntry stdlib_cxx_symbol_map[] = {
 #include "std_symbol_map.inc"  // IWYU pragma: keep
-
-  { "std::size_t", kPrivate, "<cstdio>", kPublic },
 
   // Common kludges for C++ standard libraries
 
@@ -378,27 +384,27 @@ const IncludeMapEntry stdlib_cxx_symbol_map[] = {
   // to #include the traits or alloc type ourselves.  The surest way
   // to deal with this is to just say that everyone provides
   // std::allocator.  We can add more here at need.
-  { "std::allocator", kPrivate, "<memory>", kPublic },
-  { "std::allocator", kPrivate, "<string>", kPublic },
-  { "std::allocator", kPrivate, "<vector>", kPublic },
-  { "std::allocator", kPrivate, "<map>", kPublic },
-  { "std::allocator", kPrivate, "<set>", kPublic },
+  { "std::allocator", UseKind::Full, "<memory>", kPublic },
+  { "std::allocator", UseKind::Full, "<string>", kPublic },
+  { "std::allocator", UseKind::Full, "<vector>", kPublic },
+  { "std::allocator", UseKind::Full, "<map>", kPublic },
+  { "std::allocator", UseKind::Full, "<set>", kPublic },
   // A similar kludge for std::char_traits.  basic_string,
   // basic_ostream and basic_istream have this as a default template
   // argument, and sometimes it bleeds through when clang desugars the
   // string/ostream/istream type.
-  { "std::char_traits", kPrivate, "<ostream>", kPublic },
-  { "std::char_traits<char>", kPrivate, "<ostream>", kPublic },
-  { "std::char_traits<char8_t>", kPrivate, "<ostream>", kPublic },
-  { "std::char_traits<char16_t>", kPrivate, "<ostream>", kPublic },
-  { "std::char_traits<char32_t>", kPrivate, "<ostream>", kPublic },
-  { "std::char_traits<wchar_t>", kPrivate, "<ostream>", kPublic },
-  { "std::char_traits", kPrivate, "<istream>", kPublic },
-  { "std::char_traits<char>", kPrivate, "<istream>", kPublic },
-  { "std::char_traits<char8_t>", kPrivate, "<istream>", kPublic },
-  { "std::char_traits<char16_t>", kPrivate, "<istream>", kPublic },
-  { "std::char_traits<char32_t>", kPrivate, "<istream>", kPublic },
-  { "std::char_traits<wchar_t>", kPrivate, "<istream>", kPublic },
+  { "std::char_traits", UseKind::Full, "<ostream>", kPublic },
+  { "std::char_traits<char>", UseKind::Full, "<ostream>", kPublic },
+  { "std::char_traits<char8_t>", UseKind::Full, "<ostream>", kPublic },
+  { "std::char_traits<char16_t>", UseKind::Full, "<ostream>", kPublic },
+  { "std::char_traits<char32_t>", UseKind::Full, "<ostream>", kPublic },
+  { "std::char_traits<wchar_t>", UseKind::Full, "<ostream>", kPublic },
+  { "std::char_traits", UseKind::Full, "<istream>", kPublic },
+  { "std::char_traits<char>", UseKind::Full, "<istream>", kPublic },
+  { "std::char_traits<char8_t>", UseKind::Full, "<istream>", kPublic },
+  { "std::char_traits<char16_t>", UseKind::Full, "<istream>", kPublic },
+  { "std::char_traits<char32_t>", UseKind::Full, "<istream>", kPublic },
+  { "std::char_traits<wchar_t>", UseKind::Full, "<istream>", kPublic },
 };
 
 const IncludeMapEntry libc_include_map[] = {
@@ -1230,6 +1236,7 @@ const IncludeMapEntry libcxx_include_map[] = {
     // cd llvm-project/libcxx/include ; find . -type d -name "__*" | grep -v cxx03 | LC_ALL=C sort | sed -e 's#./__\(.*\)#    {"@<__\1/.*>", kPrivate, "<\1>", kPublic},#'
     //
     // tweak `locale_dir` entry (to `<locale>`)
+    // tweak `math` entry (to `<cmath>`)
     // comment out `configuration`, `debug_utils`, `fwd`, `pstl`, `support`
     {"@<__algorithm/.*>", kPrivate, "<algorithm>", kPublic},
     {"@<__atomic/.*>", kPrivate, "<atomic>", kPublic},
@@ -1254,7 +1261,7 @@ const IncludeMapEntry libcxx_include_map[] = {
     {"@<__ios/.*>", kPrivate, "<ios>", kPublic},
     {"@<__iterator/.*>", kPrivate, "<iterator>", kPublic},
     {"@<__locale_dir/.*>", kPrivate, "<locale>", kPublic},
-    {"@<__math/.*>", kPrivate, "<math>", kPublic},
+    {"@<__math/.*>", kPrivate, "<cmath>", kPublic},
     {"@<__mdspan/.*>", kPrivate, "<mdspan>", kPublic},
     {"@<__memory/.*>", kPrivate, "<memory>", kPublic},
     {"@<__memory_resource/.*>", kPrivate, "<memory_resource>", kPublic},
@@ -1547,8 +1554,19 @@ string YAMLQuoted(IncludeVisibility visibility) {
   CHECK_UNREACHABLE_("unexpected visibility");
 }
 
+string YAMLQuoted(UseKind use_kind) {
+  switch (use_kind) {
+    case UseKind::Full:
+      return YAMLQuoted("full");
+    case UseKind::FwdDecl:
+      return YAMLQuoted("fwd-decl");
+  }
+  CHECK_UNREACHABLE_("Unexpected use kind.");
+}
+
+template <typename MapEntry>
 void WriteMappings(StringRef directive,
-                   const IncludeMapEntry* entries,
+                   const MapEntry* entries,
                    size_t count,
                    const string& filename) {
   // Never overwrite existing files.
@@ -1564,20 +1582,33 @@ void WriteMappings(StringRef directive,
       << FormatISO8601(time(nullptr)) << "\n";
   out << "[\n";
   for (size_t i = 0; i < count; ++i) {
-    const IncludeMapEntry& entry = entries[i];
-    CHECK_(entry.from_visibility != kUnusedVisibility)
-        << "cannot export unknown from-visibility";
+    const auto& entry = entries[i];
+    if constexpr (is_same_v<MapEntry, IncludeMapEntry>) {
+      CHECK_(entry.from_visibility != kUnusedVisibility)
+          << "cannot export unknown from-visibility";
+    }
     CHECK_(entry.to_visibility != kUnusedVisibility)
         << "cannot export unknown to-visibility";
 
     out << "  { " << YAMLQuoted(directive) << ": ["
-        << YAMLQuoted(entry.map_from) << ", "
-        << YAMLQuoted(entry.from_visibility) << ", "
-        << YAMLQuoted(entry.map_to) << ", "
-        << YAMLQuoted(entry.to_visibility)
-        << "] },\n";
+        << YAMLQuoted(entry.map_from) << ", ";
+    if constexpr (is_same_v<MapEntry, IncludeMapEntry>) {
+      out << YAMLQuoted(entry.from_visibility);
+    } else {
+      out << YAMLQuoted(entry.use_kind);
+    }
+    out << ", " << YAMLQuoted(entry.map_to) << ", "
+        << YAMLQuoted(entry.to_visibility) << "] },\n";
   }
   out << "]\n";
+}
+
+static optional<UseKind> ParseUseKind(StringRef use_kind) {
+  if (use_kind == "full" || use_kind == "private")
+    return UseKind::Full;
+  if (use_kind == "fwd-decl")
+    return UseKind::FwdDecl;
+  return {};
 }
 
 }  // anonymous namespace
@@ -1637,21 +1668,6 @@ void IncludePicker::AddInternalMappings(CStdLib cstdlib, CXXStdLib cxxstdlib) {
   using clang::tooling::stdlib::Lang;
   using clang::tooling::stdlib::Symbol;
 
-  if (cstdlib == CStdLib::Glibc) {
-    AddSymbolMappings(libc_symbol_map, IWYU_ARRAYSIZE(libc_symbol_map));
-    AddIncludeMappings(libc_include_map, IWYU_ARRAYSIZE(libc_include_map));
-  } else if (cstdlib == CStdLib::ClangSymbols) {
-    // Get canonical C standard library mappings from clang tooling
-    for (const Symbol& sym : Symbol::all(Lang::C)) {
-      string name = sym.name().str();
-
-      // the canonical header is returned first
-      for (const Header& header : sym.headers()) {
-        AddSymbolMapping(name, MappedInclude(header.name().str()), kPublic);
-      }
-    }
-  }
-
   if (cxxstdlib == CXXStdLib::Libstdcxx) {
     AddIncludeMappings(libstdcpp_include_map,
                        IWYU_ARRAYSIZE(libstdcpp_include_map));
@@ -1664,7 +1680,8 @@ void IncludePicker::AddInternalMappings(CStdLib cstdlib, CXXStdLib cxxstdlib) {
 
       // the canonical header is returned first
       for (const Header& header : sym.headers()) {
-        AddSymbolMapping(name, MappedInclude(header.name().str()), kPublic);
+        AddSymbolMapping(name, UseKind::Full,
+                         MappedInclude(header.name().str()), kPublic);
       }
     }
   }
@@ -1672,8 +1689,10 @@ void IncludePicker::AddInternalMappings(CStdLib cstdlib, CXXStdLib cxxstdlib) {
   if (cxxstdlib != CXXStdLib::None) {
     // Map C headers to associated C++ headers. The standard library
     // mappings shouldn't be mentioning the C headers.
-    AddIncludeMappings(stdlib_c_include_map,
-                       IWYU_ARRAYSIZE(stdlib_c_include_map));
+    if (!GlobalFlags().use_c_headers) {
+      AddIncludeMappings(stdlib_c_include_map,
+                         IWYU_ARRAYSIZE(stdlib_c_include_map));
+    }
     // C++ include mappings to allow different public headers that
     // generally include each other.
     AddIncludeMappings(stdlib_cpp_include_map,
@@ -1687,6 +1706,32 @@ void IncludePicker::AddInternalMappings(CStdLib cstdlib, CXXStdLib cxxstdlib) {
 
     AddPublicIncludes(stdlib_cpp_public_headers,
                       IWYU_ARRAYSIZE(stdlib_cpp_public_headers));
+  }
+
+  // C standard library include mapping should be added after
+  // stdlib_c_include_map so that IWYU prefers mapping <stdint.h> to <cstdint>
+  // rather than to <inttypes.h>/<cinttypes>.
+  if (cstdlib == CStdLib::Glibc) {
+    AddSymbolMappings(libc_symbol_map, IWYU_ARRAYSIZE(libc_symbol_map));
+    AddIncludeMappings(libc_include_map, IWYU_ARRAYSIZE(libc_include_map));
+  } else if (cstdlib == CStdLib::ClangSymbols) {
+    // Get canonical C standard library mappings from clang tooling
+    for (const Symbol& sym : Symbol::all(Lang::C)) {
+      string name = sym.name().str();
+
+      // the canonical header is returned first
+      for (const Header& header : sym.headers()) {
+        AddSymbolMapping(name, UseKind::Full,
+                         MappedInclude(header.name().str()), kPublic);
+      }
+    }
+  }
+
+  // HACK: Mark C standard library headers as private in C++ mode so that
+  // <cname> are suggested instead of <name.h>.
+  if (cxxstdlib != CXXStdLib::None && !GlobalFlags().use_c_headers) {
+    for (const IncludeMapEntry& entry : stdlib_c_include_map)
+      include_visibility_map_.at(entry.map_from) = IncludeVisibility::kPrivate;
   }
 }
 
@@ -1777,9 +1822,14 @@ void IncludePicker::AddIncludeMapping(const string& map_from,
 }
 
 void IncludePicker::AddSymbolMapping(const string& map_from,
+                                     UseKind use_kind,
                                      const MappedInclude& map_to,
                                      IncludeVisibility to_visibility) {
-  symbol_include_map_[map_from].push_back(map_to);
+  if (use_kind == UseKind::Full) {
+    symbol_include_map_[map_from].push_back(map_to);
+  } else {
+    fwd_decl_symbol_map_[map_from].push_back(map_to);
+  }
 
   MarkVisibility(&include_visibility_map_, map_to.quoted_include,
                  to_visibility);
@@ -1794,11 +1844,12 @@ void IncludePicker::AddIncludeMappings(const IncludeMapEntry* entries,
   }
 }
 
-void IncludePicker::AddSymbolMappings(const IncludeMapEntry* entries,
+void IncludePicker::AddSymbolMappings(const SymbolMapEntry* entries,
                                       size_t count) {
   for (size_t i = 0; i < count; ++i) {
-    const IncludeMapEntry& e = entries[i];
-    AddSymbolMapping(e.map_from, MappedInclude(e.map_to), e.to_visibility);
+    const SymbolMapEntry& e = entries[i];
+    AddSymbolMapping(e.map_from, e.use_kind, MappedInclude(e.map_to),
+                     e.to_visibility);
   }
 }
 
@@ -1909,10 +1960,11 @@ void IncludePicker::FinalizeAddedIncludes() {
   // If a.h maps to b.h maps to c.h, we'd like an entry from a.h to c.h too.
   MakeMapTransitive(&filepath_include_map_);
   // Now that filepath_include_map_ is transitively closed, it's an
-  // easy task to get the values of symbol_include_map_ closed too.
-  for (IncludeMap::value_type& symbol_include : symbol_include_map_) {
+  // easy task to get the values of symbol maps closed too.
+  for (IncludeMap::value_type& symbol_include : symbol_include_map_)
     ExpandOnce(filepath_include_map_, &symbol_include.second);
-  }
+  for (IncludeMap::value_type& symbol_include : fwd_decl_symbol_map_)
+    ExpandOnce(filepath_include_map_, &symbol_include.second);
 
   has_called_finalize_added_include_lines_ = true;
 
@@ -1920,6 +1972,7 @@ void IncludePicker::FinalizeAddedIncludes() {
   if (ShouldPrint(9)) {
     PrintMappings(filepath_include_map_, "filepath_include_map_");
     PrintMappings(symbol_include_map_, "symbol_include_map_");
+    PrintMappings(fwd_decl_symbol_map_, "fwd_decl_symbol_map_");
   }
 }
 
@@ -1990,6 +2043,13 @@ vector<MappedInclude> IncludePicker::GetCandidateHeadersForSymbol(
     const string& symbol) const {
   CHECK_(has_called_finalize_added_include_lines_ && "Must finalize includes");
   return GetPublicValues(symbol_include_map_, symbol);
+}
+
+vector<string> IncludePicker::GetCandidateHeadersForSymbolFwdDecl(
+    const string& symbol, const string& including_filepath) const {
+  CHECK_(has_called_finalize_added_include_lines_ && "Must finalize includes");
+  return BestQuotedIncludesForIncluder(
+      GetPublicValues(fwd_decl_symbol_map_, symbol), including_filepath);
 }
 
 vector<string> IncludePicker::GetCandidateHeadersForSymbolUsedFrom(
@@ -2200,7 +2260,15 @@ void IncludePicker::AddMappingsFromFile(const string& filename,
           return;
         }
 
-        AddSymbolMapping(mapping[0], MappedInclude(mapping[2]), to_visibility);
+        optional<UseKind> use_kind = ParseUseKind(mapping[1]);
+        if (!use_kind) {
+          json_stream.printError(
+              current_node, "Unknown symbol use kind '" + mapping[1] + "'.");
+          return;
+        }
+
+        AddSymbolMapping(mapping[0], *use_kind, MappedInclude(mapping[2]),
+                         to_visibility);
       } else if (directive == "include") {
         // Include mapping.
         vector<string> mapping = GetSequenceValue(mapping_item_node.getValue());

@@ -45,6 +45,7 @@ class ClassTemplateSpecializationDecl;
 class Decl;
 class DeclContext;
 class DeclRefExpr;
+class ExplicitInstantiationDecl;
 class Expr;
 class Sema;
 class Stmt;
@@ -393,12 +394,25 @@ template<typename T> class ValueSaver {
   }
   // The one-arg version just uses the current value as newval.
   explicit ValueSaver(T* p) : ptr_(p), oldval_(*ptr_) { }
+  // Move constructor for factory methods.
+  ValueSaver(ValueSaver&& rhs)
+      : ptr_(rhs.ptr_), oldval_(std::move(rhs.oldval_)) {
+    rhs.reset();
+  }
+  ValueSaver(const ValueSaver&) = delete;
 
-  ~ValueSaver() { *ptr_ = oldval_; }
+  ~ValueSaver() {
+    if (ptr_)
+      *ptr_ = oldval_;
+  }
+
+  void reset() {
+    ptr_ = nullptr;
+  }
 
  private:
   T* const ptr_;
-  const T oldval_;
+  T oldval_;
 };
 
 // An object of this type updates current_ast_node_ to be the given
@@ -644,8 +658,8 @@ TemplateInstantiationData GetTplInstDataForVariable(
     std::function<set<const clang::Type*>(const clang::Type*)> provided_getter);
 
 // If class_decl is instantiated from a class template,
-// returns the decl for that template; otherwise returns class_decl.
-// As an example, consider this code:
+// returns the CXXRecordDecl describing that template; otherwise returns
+// class_decl. As an example, consider this code:
 //    template<class T> class Foo { ... };   // template decl
 //    template<> class Foo<int> { ... };     // explicit specialization
 //    template class Foo<char>;              // note: no body specified
@@ -758,10 +772,6 @@ bool DeclsAreInSameClass(const clang::Decl* decl1, const clang::Decl* decl2);
 // Returns true if the given decl/name is a builtin function
 bool IsBuiltinFunction(const clang::NamedDecl* decl);
 
-// Returns true if the function decl is an implicitly instantiated definition
-// (in particular, not just a declaration).
-bool IsImplicitlyInstantiatedDfn(const clang::FunctionDecl*);
-
 // If the given method overrides base class methods, returns the overridden
 // method declaration from the least derived class, otherwise returns the given
 // argument.
@@ -800,6 +810,13 @@ bool IsDefTplArgInherited(const clang::NamedDecl* tpl_param);
 bool IsDefTplArgSpecified(const clang::NamedDecl* tpl_param);
 
 unsigned GetTplParamNumberWithoutPack(const clang::TemplateDecl*);
+
+// I/O stream typedefs should be considered as non-providing even if they are
+// redefined after the underlying template definitions in some implementation.
+// Their canonical header is <iosfwd>, but when used in a context requiring
+// complete type info, the underlying type should be reported, causing
+// suggestion of the corresponding complete definition header.
+bool IsStdNonProvidingTypedef(const clang::TypedefNameDecl* decl);
 
 // --- Utilities for Type.
 
@@ -857,7 +874,8 @@ set<const clang::Type*> GetCanonicalComponentsOfType(const clang::Type* type);
 set<const clang::Type*> GetComponentsOfTypeWithoutSubstituted(
     const clang::Type*);
 
-// Returns true if the type has any template arguments.
+// Returns true if the type refers to an instantiated template specialization
+// or to its member class, but not to some (pure) explicit specialization.
 bool IsTemplatizedType(const clang::Type* type);
 
 // Returns true if any type involved (recursively examining template
@@ -955,6 +973,10 @@ TemplateInstantiationData GetTplInstDataForClass(
 // in the result-map.
 TemplateInstantiationData GetTplInstDataForClassNoComponentTypes(
     const clang::Type* type,
+    std::function<set<const clang::Type*>(const clang::Type*)> provided_getter);
+
+TemplateInstantiationData GetTplExplicitInstData(
+    const clang::ExplicitInstantiationDecl* decl,
     std::function<set<const clang::Type*>(const clang::Type*)> provided_getter);
 
 // Returns true if, for the given enumeration type, opaque (i.e. forward,

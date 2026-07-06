@@ -62,7 +62,6 @@
 #include "llvm/Support/Casting.h"
 
 // TODO: Clean out pragmas as IWYU improves.
-// IWYU pragma: no_include "clang/AST/StmtIterator.h"
 // IWYU pragma: no_include "clang/Basic/CustomizableOptional.h"
 // IWYU pragma: no_include <tuple>
 
@@ -98,6 +97,7 @@ using clang::EnterExpressionEvaluationContext;
 using clang::EnumDecl;
 using clang::EnumType;
 using clang::ExplicitCastExpr;
+using clang::ExplicitInstantiationDecl;
 using clang::Expr;
 using clang::ExprResult;
 using clang::ExprValueKind;
@@ -105,7 +105,6 @@ using clang::ExprWithCleanups;
 using clang::FunctionDecl;
 using clang::FunctionProtoType;
 using clang::FunctionTemplateDecl;
-using clang::FunctionTemplateSpecializationInfo;
 using clang::FunctionType;
 using clang::IdentifierInfo;
 using clang::ImplicitCastExpr;
@@ -168,9 +167,8 @@ using clang::UnresolvedLookupExpr;
 using clang::UsingDirectiveDecl;
 using clang::ValueDecl;
 using clang::VarDecl;
-using clang::VarTemplateDecl;
-using clang::VarTemplatePartialSpecializationDecl;
 using clang::VarTemplateSpecializationDecl;
+using clang::isTemplateInstantiation;
 using llvm::ArrayRef;
 using llvm::ListSeparator;
 using llvm::PointerUnion;
@@ -840,19 +838,6 @@ bool IsImplicitInstantiation(const VarDecl* decl) {
 }
 
 bool HasImplicitConversionCtor(const CXXRecordDecl* cxx_class) {
-  // Clang leaves ClassTemplateSpecializationDecl empty for uninstantiated
-  // specializations. Hence, replace cxx_class with template definition so that
-  // IWYU can find constructors.
-  if (const auto* tpl_spec =
-          dyn_cast<ClassTemplateSpecializationDecl>(cxx_class)) {
-    if (!tpl_spec->isExplicitSpecialization()) {
-      cxx_class = tpl_spec->getSpecializedTemplate()
-                      ->getCanonicalDecl()
-                      ->getTemplatedDecl();
-    }
-    // TODO(bolshakov): handle partial specializations.
-  }
-
   for (CXXRecordDecl::ctor_iterator ctor = cxx_class->ctor_begin();
        ctor != cxx_class->ctor_end(); ++ctor) {
     if (!IsImplicitConversionCtor(*ctor))
@@ -1023,6 +1008,20 @@ static map<const Type*, const Type*> GetTplTypeResugarMapForExplicitTplArgs(
   return retval;
 }
 
+static map<const Type*, const Type*> GetTplTypeResugarMapForExplicitTplArgs(
+    const ExplicitInstantiationDecl* decl) {
+  map<const Type*, const Type*> retval;
+  for (unsigned i = 0; i < decl->getNumTemplateArgs().value_or(0); ++i) {
+    TemplateArgumentLoc loc = decl->getTemplateArg(i);
+    if (const Type* arg_type = GetTemplateArgAsType(loc.getArgument())) {
+      retval[GetCanonicalType(arg_type)] = arg_type;
+      VERRS(6) << "Adding an explicit template argument type of interest: "
+               << PrintableType(arg_type) << "\n";
+    }
+  }
+  return retval;
+}
+
 // Get the type of an expression while preserving as much type sugar as
 // possible. This was originally designed for use with function argument
 // expressions, and so might not work in a more general context.
@@ -1104,6 +1103,33 @@ static map<const Type*, const Type*> GetDefaultedArgResugarMap(
   return res;
 }
 
+static TemplateInstantiationData GetDeducedTplArgData(
+    const map<const Type*, const Type*>& implicit_tpl_arg_map,
+    const set<const Type*>& fn_param_types,
+    function<set<const Type*>(const Type*)> provided_getter) {
+  TemplateInstantiationData res;
+  for (const Type* type : fn_param_types) {
+    // See if any of the template args in resugar_map are the desugared form
+    // of us.
+    const Type* desugared_type = GetCanonicalType(type);
+    if (ContainsKey(implicit_tpl_arg_map, desugared_type)) {
+      res.resugar_map[desugared_type] = type;
+      if (desugared_type != type) {
+        VERRS(6) << "Remapping template arg of interest: "
+                 << PrintableType(desugared_type) << " -> "
+                 << PrintableType(type) << "\n";
+      }
+    }
+    // TODO(bolshakov): more fine-grained determination of provided types could
+    // e.g. consider only arguments that actually take part in type deduction.
+    // Simply moving the line below into the if-statement body above doesn't
+    // work because 'type' can be just an internal component of a 'typedef'ed
+    // argument.
+    InsertAllInto(provided_getter(type), &res.provided_types);
+  }
+  return res;
+}
+
 void InsertInto(const TemplateInstantiationData& source,
                 TemplateInstantiationData* target) {
   CHECK_(target);
@@ -1114,8 +1140,7 @@ void InsertInto(const TemplateInstantiationData& source,
 TemplateInstantiationData GetTplInstDataForFunction(
     const FunctionDecl* decl, const Expr* calling_expr,
     function<set<const Type*>(const Type*)> provided_getter) {
-  map<const Type*, const Type*> resugar_map;
-  set<const Type*> provided_types;
+  TemplateInstantiationData res;
 
   // If calling_expr is nullptr, then we can't find any explicit template
   // arguments, if they were specified (e.g. 'Fn<int>()'), and we
@@ -1123,10 +1148,10 @@ TemplateInstantiationData GetTplInstDataForFunction(
   // can't resugar at all.  We just have to hope that the types happen
   // to be already sugared, because the actual-type is already canonical.
   if (calling_expr == nullptr) {
-    resugar_map = GetTplTypeResugarMapForFunctionNoCallExpr(decl, 0);
-    resugar_map = ResugarTypeComponents(
-        resugar_map);  // add in resugar_map's decomposition
-    return TemplateInstantiationData{resugar_map, {}};
+    res.resugar_map = GetTplTypeResugarMapForFunctionNoCallExpr(decl, 0);
+    res.resugar_map = ResugarTypeComponents(
+        res.resugar_map);  // add in resugar_map's decomposition
+    return res;
   }
 
   // If calling_expr is a CXXConstructExpr of CXXNewExpr, then it's
@@ -1148,7 +1173,8 @@ TemplateInstantiationData GetTplInstDataForFunction(
     const TemplateArgumentListInfo& explicit_tpl_args =
         GetExplicitTplArgs(callee_expr);
     if (explicit_tpl_args.size() > 0) {
-      resugar_map = GetTplTypeResugarMapForExplicitTplArgs(explicit_tpl_args);
+      res.resugar_map =
+          GetTplTypeResugarMapForExplicitTplArgs(explicit_tpl_args);
       start_of_implicit_args = explicit_tpl_args.size();
     }
   } else {
@@ -1156,13 +1182,14 @@ TemplateInstantiationData GetTplInstDataForFunction(
     const TemplateArgumentListInfo& explicit_tpl_args =
         GetExplicitTplArgs(calling_expr);
     if (explicit_tpl_args.size() > 0) {
-      resugar_map = GetTplTypeResugarMapForExplicitTplArgs(explicit_tpl_args);
-      resugar_map = ResugarTypeComponents(resugar_map);
-      for (const auto [_, sugared_type] : resugar_map)
-        InsertAllInto(provided_getter(sugared_type), &provided_types);
+      res.resugar_map =
+          GetTplTypeResugarMapForExplicitTplArgs(explicit_tpl_args);
+      res.resugar_map = ResugarTypeComponents(res.resugar_map);
+      for (const auto [_, sugared_type] : res.resugar_map)
+        InsertAllInto(provided_getter(sugared_type), &res.provided_types);
     }
-    InsertAllInto(GetDefaultedArgResugarMap(decl), &resugar_map);
-    return TemplateInstantiationData{resugar_map, provided_types};
+    InsertAllInto(GetDefaultedArgResugarMap(decl), &res.resugar_map);
+    return res;
   }
 
   // Now we have to figure out, as best we can, the sugar-mappings for
@@ -1191,41 +1218,24 @@ TemplateInstantiationData GetTplInstDataForFunction(
     InsertAllInto(GetComponentsOfType(argtype), &fn_arg_types);
   }
 
-  for (const Type* type : fn_arg_types) {
-    // See if any of the template args in resugar_map are the desugared form
-    // of us.
-    const Type* desugared_type = GetCanonicalType(type);
-    if (ContainsKey(desugared_types, desugared_type)) {
-      resugar_map[desugared_type] = type;
-      if (desugared_type != type) {
-        VERRS(6) << "Remapping template arg of interest: "
-                 << PrintableType(desugared_type) << " -> "
-                 << PrintableType(type) << "\n";
-      }
-    }
-    // TODO(bolshakov): more fine-grained determination of provided types could
-    // e.g. consider only arguments that actually take part in type deduction.
-    // Simply moving the line below into the if-statement body above doesn't
-    // work because 'type' can be just an internal component of a 'typedef'ed
-    // argument.
-    InsertAllInto(provided_getter(type), &provided_types);
-  }
-
-  InsertAllInto(GetDefaultedArgResugarMap(decl), &resugar_map);
+  InsertInto(
+      GetDeducedTplArgData(desugared_types, fn_arg_types, provided_getter),
+      &res);
+  InsertAllInto(GetDefaultedArgResugarMap(decl), &res.resugar_map);
 
   // Log the types we never mapped.
   for (const auto& types : desugared_types) {
-    if (!ContainsKey(resugar_map, types.first)) {
+    if (!ContainsKey(res.resugar_map, types.first)) {
       VERRS(6) << "Ignoring unseen-in-fn-args template arg of interest: "
                << PrintableType(types.first) << "\n";
     }
   }
 
-  resugar_map = ResugarTypeComponents(
-      resugar_map);  // add in the decomposition of resugar_map
-  for (const auto [_, sugared_type] : resugar_map)
-    InsertAllInto(provided_getter(sugared_type), &provided_types);
-  return TemplateInstantiationData{resugar_map, provided_types};
+  res.resugar_map = ResugarTypeComponents(
+      res.resugar_map);  // add in the decomposition of resugar_map
+  for (const auto [_, sugared_type] : res.resugar_map)
+    InsertAllInto(provided_getter(sugared_type), &res.provided_types);
+  return res;
 }
 
 TemplateInstantiationData GetTplInstDataForVariable(
@@ -1247,33 +1257,15 @@ TemplateInstantiationData GetTplInstDataForVariable(
 }
 
 const NamedDecl* GetInstantiatedFromDecl(const NamedDecl* decl) {
-  if (const auto* tpl_sp_decl = dyn_cast<ClassTemplateSpecializationDecl>(
-          decl)) {  // an instantiated class template
-    PointerUnion<ClassTemplateDecl*, ClassTemplatePartialSpecializationDecl*>
-        instantiated_from = tpl_sp_decl->getInstantiatedFrom();
-    if (const auto* tpl_decl =
-            instantiated_from.dyn_cast<ClassTemplateDecl*>()) {
-      // decl is instantiated from a non-specialized template.
-      return tpl_decl;
-    } else if (const auto* partial_spec_decl =
-                   instantiated_from
-                       .dyn_cast<ClassTemplatePartialSpecializationDecl*>()) {
-      // decl is instantiated from a template partial specialization.
-      return partial_spec_decl;
+  if (const auto* record_decl = dyn_cast<CXXRecordDecl>(decl)) {
+    if (const CXXRecordDecl* pattern =
+            record_decl->getTemplateInstantiationPattern()) {
+      return pattern;
     }
-  }
-  if (const auto* tpl_sp_decl = dyn_cast<VarTemplateSpecializationDecl>(decl)) {
-    // An instantiated variable template.
-    PointerUnion<VarTemplateDecl*, VarTemplatePartialSpecializationDecl*>
-        instantiated_from = tpl_sp_decl->getInstantiatedFrom();
-    if (const auto* tpl_decl = instantiated_from.dyn_cast<VarTemplateDecl*>()) {
-      // decl is instantiated from a non-specialized template.
-      return tpl_decl;
-    } else if (const auto* partial_spec_decl =
-                   instantiated_from
-                       .dyn_cast<VarTemplatePartialSpecializationDecl*>()) {
-      // decl is instantiated from a template partial specialization.
-      return partial_spec_decl;
+  } else if (const auto* var_decl = dyn_cast<VarDecl>(decl)) {
+    if (const VarDecl* pattern = var_decl->getTemplateInstantiationPattern()) {
+      if (const VarDecl* defn = pattern->getDefinition())
+        return defn;
     }
   }
   // decl is not instantiated from a class or a variable template.
@@ -1281,6 +1273,8 @@ const NamedDecl* GetInstantiatedFromDecl(const NamedDecl* decl) {
 }
 
 const NamedDecl* GetDefinitionAsWritten(const NamedDecl* decl) {
+  if (!decl)
+    return nullptr;
   // First, get to decl-as-written.
   if (const auto* func_decl = dyn_cast<FunctionDecl>(decl)) {
     // If we're instantiated from a template, use the template pattern as the
@@ -1293,9 +1287,6 @@ const NamedDecl* GetDefinitionAsWritten(const NamedDecl* decl) {
       decl = tp_decl;
   } else {
     decl = GetInstantiatedFromDecl(decl);
-    if (const auto* tpl_decl = dyn_cast<ClassTemplateDecl>(decl))
-      decl = tpl_decl->getTemplatedDecl();  // convert back to CXXRecordDecl
-    // TODO(bolshakov): getTemplatedDecl() for VarTemplateDecls?
   }
   // Then, get to definition.
   if (const NamedDecl* class_dfn = GetTagDefinition(decl)) {
@@ -1498,16 +1489,6 @@ bool IsBuiltinFunction(const NamedDecl* decl) {
   return false;
 }
 
-bool IsImplicitlyInstantiatedDfn(const FunctionDecl* decl) {
-  const FunctionTemplateSpecializationInfo* tpl_spec_info =
-      decl->getTemplateSpecializationInfo();
-  if (!tpl_spec_info)
-    return false;  // Not a template specialization.
-  return decl->isThisDeclarationADefinition() &&
-         tpl_spec_info->getTemplateSpecializationKind() ==
-             clang::TSK_ImplicitInstantiation;
-}
-
 const CXXMethodDecl* GetFromLeastDerived(const CXXMethodDecl* decl) {
   while (decl->size_overridden_methods())
     decl = *decl->begin_overridden_methods();
@@ -1589,6 +1570,58 @@ unsigned GetTplParamNumberWithoutPack(const TemplateDecl* tpl) {
   return params->hasParameterPack() ? size - 1 : size;
 }
 
+bool IsStdNonProvidingTypedef(const TypedefNameDecl* decl) {
+  string name = GetWrittenQualifiedNameAsString(decl, /*with_fn_args=*/false);
+  // clang-format off
+  static const set<string> typedefs = {
+    "std::filebuf",
+    "std::fstream",
+    "std::ifstream",
+    "std::ios",
+    "std::iostream",
+    "std::ispanstream",
+    "std::istream",
+    "std::istringstream",
+    "std::ofstream",
+    "std::ospanstream",
+    "std::ostream",
+    "std::ostringstream",
+    "std::osyncstream",
+    "std::spanbuf",
+    "std::spanstream",
+    "std::streambuf",
+    "std::streampos",
+    "std::stringbuf",
+    "std::stringstream",
+    "std::syncbuf",
+    "std::u16streampos",
+    "std::u32streampos",
+    "std::u8streampos",
+    "std::wfilebuf",
+    "std::wfstream",
+    "std::wifstream",
+    "std::wios",
+    "std::wiostream",
+    "std::wispanstream",
+    "std::wistream",
+    "std::wistringstream",
+    "std::wofstream",
+    "std::wospanstream",
+    "std::wostream",
+    "std::wostringstream",
+    "std::wosyncstream",
+    "std::wspanbuf",
+    "std::wspanstream",
+    "std::wstreambuf",
+    "std::wstreampos",
+    "std::wstringbuf",
+    "std::wstringstream",
+    "std::wsyncbuf",
+  };
+  // clang-format on
+  return typedefs.count(name);
+}
+
 // --- Utilities for Type.
 
 bool IsElaboratedTypeSpecifier(const TypeWithKeyword* type) {
@@ -1667,7 +1700,25 @@ const Type* Desugar(const Type* type) {
 }
 
 bool IsTemplatizedType(const Type* type) {
-  return type && type->getAs<TemplateSpecializationType>();
+  if (!type)
+    return false;
+  // If decl is an explicit specialization, it may still be implicitly
+  // instantiated, like in this case:
+  //
+  // template <typename T> struct Outer {
+  //   template <typename> struct Inner;
+  //   template <> struct Inner<int> {};
+  // };
+  //
+  // Given this example, Outer<char>::Inner<int> is an explicit specialization
+  // but at the same time an implicit instantiation for IWYU purposes. Thus,
+  // parent semantic contexts should be explored.
+  for (const auto* decl = type->getAsCXXRecordDecl(); decl;
+       decl = dyn_cast<CXXRecordDecl>(decl->getDeclContext())) {
+    if (isTemplateInstantiation(decl->getTemplateSpecializationKind()))
+      return true;
+  }
+  return false;
 }
 
 bool InvolvesTypeForWhich(const Type* type, function<bool(const Type*)> pred) {
@@ -1801,7 +1852,7 @@ bool HasImplicitConversionConstructor(const Type* type) {
     return false;  // can't implicitly convert to a non-const reference
 
   type = RemoveReferenceAsWritten(type);
-  const NamedDecl* decl = TypeToDeclAsWritten(type);
+  const NamedDecl* decl = GetTagDefinition(TypeToDeclAsWritten(type));
   if (!decl)  // not the kind of type that has a decl (e.g. built-in)
     return false;
 
@@ -1888,20 +1939,49 @@ TemplateInstantiationData GetTplInstDataForClassNoComponentTypes(
     const clang::Type* type,
     std::function<set<const clang::Type*>(const clang::Type*)>
         provided_getter) {
-  const auto* tpl_spec_type = type->getAs<TemplateSpecializationType>();
-  if (!tpl_spec_type)
-    return TemplateInstantiationData{};
-  const NamedDecl* decl = TypeToDeclAsWritten(tpl_spec_type);
-  const auto* cls_tpl_decl = dyn_cast<ClassTemplateSpecializationDecl>(decl);
-  return GetTplInstDataForClassNoComponentTypes(
-      tpl_spec_type->template_arguments(), cls_tpl_decl, provided_getter);
+  TemplateInstantiationData res;
+  // Collect type template arguments from all the parts of a probably qualified
+  // name (like Level1<Arg1>::Level2<Arg2>::Level3<Arg3>).
+  const Type* part = Desugar(type);
+  while (part) {
+    if (const auto* typedef_type = part->getAs<TypedefType>()) {
+      // Underlying types of aliases may in turn be qualified or unqualified
+      // template specialization types.
+      const Type* underlying = typedef_type->desugar().getTypePtr();
+      InsertInto(
+          GetTplInstDataForClassNoComponentTypes(underlying, provided_getter),
+          &res);
+    }
+
+    if (const auto* tpl_spec_type = part->getAs<TemplateSpecializationType>()) {
+      if (const NamedDecl* decl = TypeToDeclAsWritten(tpl_spec_type)) {
+        const auto* cls_tpl_decl =
+            dyn_cast<ClassTemplateSpecializationDecl>(decl);
+        TemplateInstantiationData data = GetTplInstDataForClassNoComponentTypes(
+            tpl_spec_type->template_arguments(), cls_tpl_decl, provided_getter);
+        InsertInto(data, &res);
+      }
+
+      if (tpl_spec_type->isTypeAlias()) {
+        const Type* underlying = tpl_spec_type->desugar().getTypePtr();
+        InsertInto(
+            GetTplInstDataForClassNoComponentTypes(underlying, provided_getter),
+            &res);
+      }
+    }
+
+    NestedNameSpecifier nns = part->getPrefix();
+    part = nns.getKind() == NestedNameSpecifier::Kind::Type
+               ? Desugar(nns.getAsType())
+               : nullptr;
+  }
+  return res;
 }
 
 TemplateInstantiationData GetTplInstDataForClass(
     const Type* type, function<set<const Type*>(const Type*)> provided_getter) {
   TemplateInstantiationData result =
       GetTplInstDataForClassNoComponentTypes(type, provided_getter);
-  InsertAllInto(provided_getter(type), &result.provided_types);
   return TemplateInstantiationData{
       ResugarTypeComponents(
           result.resugar_map),  // add in the decomposition of retval
@@ -1918,6 +1998,41 @@ TemplateInstantiationData GetTplInstDataForClass(
       ResugarTypeComponents(
           result.resugar_map),  // add in the decomposition of retval
       result.provided_types};
+}
+
+TemplateInstantiationData GetTplExplicitInstData(
+    const ExplicitInstantiationDecl* decl,
+    function<set<const Type*>(const Type*)> provided_getter) {
+  TemplateInstantiationData res;
+  res.resugar_map = GetTplTypeResugarMapForExplicitTplArgs(decl);
+  const NamedDecl* spec = decl->getSpecialization();
+  if (const auto* fn_spec = dyn_cast<FunctionDecl>(spec)) {
+    map<const Type*, const Type*> implicit_tpl_arg_map =
+        GetTplTypeResugarMapForFunctionNoCallExpr(
+            fn_spec, /*start_arg=*/decl->getNumTemplateArgs().value_or(0));
+
+    set<const Type*> fn_param_types;
+    const auto* fn_type =
+        decl->getTypeAsWritten()->getType()->getAs<FunctionProtoType>();
+    for (QualType param : fn_type->param_types())
+      InsertAllInto(GetComponentsOfType(param.getTypePtr()), &fn_param_types);
+    InsertInto(GetDeducedTplArgData(implicit_tpl_arg_map, fn_param_types,
+                                    provided_getter),
+               &res);
+
+    InsertAllInto(GetDefaultedArgResugarMap(fn_spec), &res.resugar_map);
+  }
+  // TODO(bolshakov): handle other specialization kinds.
+  if (TypeLoc host_type_loc = decl->getQualifierLoc().getAsTypeLoc()) {
+    const Type* host = host_type_loc.getTypePtr();
+    InsertInto(GetTplInstDataForClassNoComponentTypes(host, provided_getter),
+               &res);
+    InsertAllInto(provided_getter(host), &res.provided_types);
+  }
+  res.resugar_map = ResugarTypeComponents(res.resugar_map);
+  for (const auto [_, sugared_type] : res.resugar_map)
+    InsertAllInto(provided_getter(sugared_type), &res.provided_types);
+  return res;
 }
 
 bool CanBeOpaqueDeclared(const EnumType* type) {

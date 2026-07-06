@@ -9,14 +9,12 @@
 
 #include "iwyu_cache.h"
 
-#include <functional>
 #include <set>
 #include <string>
 
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/TemplateBase.h"
-#include "clang/AST/Type.h"
 #include "clang/Basic/LangOptions.h"
 #include "iwyu_ast_util.h"
 #include "iwyu_stl_util.h"
@@ -26,7 +24,6 @@ using clang::LangOptions;
 using clang::NamedDecl;
 using clang::TemplateArgument;
 using clang::TemplateArgumentList;
-using clang::TemplateSpecializationType;
 using clang::Type;
 using std::set;
 using std::string;
@@ -65,14 +62,16 @@ static const char* const kFullUseTypes[] = {
 // 'myclass_vector.clear();'.  This is because the former never tries
 // to instantiate methods, making the hard-coding much easier.
 map<const Type*, const Type*> FullUseCache::GetPrecomputedResugarMap(
-    const TemplateSpecializationType* tpl_type, const LangOptions& lang_opts) {
+    const Type* type, const LangOptions& lang_opts) {
   static const int fulluse_size =
       (sizeof(kFullUseTypes) / sizeof(*kFullUseTypes));
   set<string> fulluse_types(kFullUseTypes, kFullUseTypes + fulluse_size);
   if (!lang_opts.CPlusPlus17)
     fulluse_types.insert({"std::forward_list", "std::list", "std::vector"});
 
-  const NamedDecl* tpl_decl = TypeToDeclAsWritten(tpl_type);
+  const NamedDecl* tpl_decl = TypeToDeclAsWritten(type);
+  if (!tpl_decl)  // This probably means that the template name is dependent.
+    return map<const Type*, const Type*>();
   if (!ContainsKey(fulluse_types, GetWrittenQualifiedNameAsString(
                                       tpl_decl, /*with_fn_args=*/false)))
     return map<const Type*, const Type*>();
@@ -94,7 +93,7 @@ map<const Type*, const Type*> FullUseCache::GetPrecomputedResugarMap(
   // do something more clever here if any types in kFullUseTypes start
   // accepting template-template types.)
   return GetTplInstDataForClassNoComponentTypes(
-             tpl_type, [](const Type* type) { return set<const Type*>(); })
+             type, [](const Type* type) { return set<const Type*>(); })
       .resugar_map;
 }
 

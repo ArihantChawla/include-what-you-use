@@ -29,3 +29,22 @@ using NonProvidingAlias = ns_in_d2::NonProvidingTypedef;
 
 using NonProvidingFunctionAlias1 = int(IndirectClass&);
 using NonProvidingFunctionAlias2 = IndirectClass(int);
+
+template <int>
+using NonProvidingPtrAlias = IndirectClass*;
+
+template <typename T>
+struct Host;
+
+using HostNonProvidingAlias = Host<IndirectClass>;
+
+template <typename>
+using HostNonProvidingAliasTpl = Host<IndirectClass>;
+
+using IndirectClassNonProviding = IndirectClass;
+
+template <typename>
+struct TplWithMethodWithoutDef;
+
+using TplWithMethodWithoutDefNonProviding =
+    TplWithMethodWithoutDef<IndirectClass>;

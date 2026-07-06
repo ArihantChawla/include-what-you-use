@@ -11,6 +11,8 @@
 
 #include "tests/cxx/direct.h"
 
+class IndirectClass;
+
 template <typename T>
 class Inner {
   T t;
@@ -45,6 +47,41 @@ constexpr int getInt() {
   return 1;
 }
 
+template <typename T = IndirectClass>
+class TplWithNotProvidedDefArg {
+  T t;
+};
+
+template <typename>
+void TplFn() {
+}
+
+template <typename>
+void TplFnWithRedecl() {
+}
+
+template <typename>
+void TplFnWithRedecl2() {
+}
+
+template <typename T>
+int var_tpl;
+
+template <typename T>
+int var_tpl_with_redecl;
+
+template <typename T>
+int var_tpl_with_redecl2;
+
+template <typename>
+struct Host {
+  void Fn();
+  static void StaticFn();
+  static int i;
+  template <typename U>
+  static U var_tpl;
+};
+
 #endif  // INCLUDE_WHAT_YOU_USE_TESTS_CXX_EXPLICIT_INSTANTIATION_TEMPLATE_H_
 
 /**** IWYU_SUMMARY
@@ -55,5 +92,6 @@ tests/cxx/explicit_instantiation-template.h should remove these lines:
 - #include "tests/cxx/direct.h"  // lines XX-XX
 
 The full include-list for tests/cxx/explicit_instantiation-template.h:
+class IndirectClass;  // lines XX-XX
 
 ***** IWYU_SUMMARY */

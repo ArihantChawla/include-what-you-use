@@ -14,7 +14,6 @@
 #include <iterator>                     // for inserter
 #include <list>
 #include <map>                          // for _Rb_tree_const_iterator, etc
-#include <regex>
 #include <utility>                      // for pair, make_pair, operator>
 #include <vector>                       // for vector, vector<>::iterator, etc
 
@@ -73,8 +72,6 @@ using llvm::raw_string_ostream;
 using std::map;
 using std::multimap;
 using std::pair;
-using std::regex;
-using std::regex_replace;
 using std::sort;
 using std::to_string;
 using std::vector;
@@ -281,9 +278,12 @@ string GetShortNameAsString(const NamedDecl* named_decl) {
 }  // namespace internal
 
 // Holds information about a single full or fwd-decl use of a symbol.
-OneUse::OneUse(const NamedDecl* decl, SourceLocation use_loc,
-               SourceLocation decl_loc, OneUse::UseKind use_kind,
-               UseFlags flags, const char* comment)
+OneUse::OneUse(const NamedDecl* decl,
+               SourceLocation use_loc,
+               SourceLocation decl_loc,
+               UseKind use_kind,
+               UseFlags flags,
+               const char* comment)
     : symbol_name_(internal::GetQualifiedNameAsString(decl)),
       short_symbol_name_(internal::GetShortNameAsString(decl)),
       decl_(decl),
@@ -299,7 +299,8 @@ OneUse::OneUse(const NamedDecl* decl, SourceLocation use_loc,
 }
 
 // This constructor always creates a full use.
-OneUse::OneUse(const string& symbol_name, OptionalFileEntryRef dfn_file,
+OneUse::OneUse(const string& symbol_name,
+               OptionalFileEntryRef dfn_file,
                SourceLocation use_loc)
     : symbol_name_(symbol_name),
       short_symbol_name_(symbol_name),
@@ -307,7 +308,7 @@ OneUse::OneUse(const string& symbol_name, OptionalFileEntryRef dfn_file,
       decl_file_(dfn_file),
       decl_filepath_(GetFilePath(dfn_file)),
       use_loc_(use_loc),
-      use_kind_(kFullUse),
+      use_kind_(UseKind::Full),
       use_flags_(UF_None),
       ignore_use_(false),
       is_iwyu_violation_(false) {
@@ -327,7 +328,7 @@ OneUse::OneUse(OptionalFileEntryRef included_file,
       decl_file_(included_file),
       decl_filepath_(GetFilePath(included_file)),
       use_loc_(include_loc),
-      use_kind_(kFullUse),
+      use_kind_(UseKind::Full),
       use_flags_(UF_None),
       ignore_use_(false),
       is_iwyu_violation_(false) {
@@ -336,12 +337,24 @@ OneUse::OneUse(OptionalFileEntryRef included_file,
   suggested_header_ = quoted_include;
 }
 
+bool OneUse::is_full_use() const {
+  return use_kind_ == UseKind::Full;
+}
+
 void OneUse::reset_decl(const NamedDecl* decl) {
   CHECK_(decl_ && "Need existing decl to reset it");
   CHECK_(decl && "Need to reset decl with existing decl");
   decl_ = decl;
   decl_file_ = GetFileEntry(decl);
   decl_filepath_ = GetFilePath(decl);
+}
+
+void OneUse::set_full_use() {
+  use_kind_ = UseKind::Full;
+}
+
+void OneUse::set_forward_declare_use() {
+  use_kind_ = UseKind::FwdDecl;
 }
 
 int OneUse::UseLinenum() const {
@@ -356,6 +369,13 @@ void OneUse::SetPublicHeaders() {
   // We should never need to deal with public headers if we already know
   // who we map to.
   CHECK_(suggested_header_.empty() && "Should not need a public header here");
+
+  if (use_kind_ == UseKind::FwdDecl) {
+    public_headers_ = GlobalIncludePicker().GetCandidateHeadersForSymbolFwdDecl(
+        symbol_name_, GetFilePath(use_loc_));
+    return;
+  }
+
   if (decl_) {
     public_headers_ = GlobalIncludePicker().GetMappedPublicHeaders(
         decl_, GetFilePath(use_loc_), decl_filepath());
@@ -370,7 +390,8 @@ void OneUse::SetPublicHeaders() {
 const vector<string>& OneUse::public_headers() {
   if (public_headers_.empty()) {
     SetPublicHeaders();
-    CHECK_(!public_headers_.empty() && "Should always have at least one hdr");
+    CHECK_(use_kind_ == UseKind::FwdDecl || !public_headers_.empty())
+        << "Full uses should always have at least one hdr";
   }
   return public_headers_;
 }
@@ -380,8 +401,14 @@ bool OneUse::PublicHeadersContain(const string& elt) {
   return ContainsValue(public_headers(), elt);
 }
 
-bool OneUse::NeedsSuggestedHeader() const {
-  return (!ignore_use() && is_full_use() && suggested_header_.empty());;
+bool OneUse::NeedsSuggestedHeader() {
+  if (ignore_use() || !suggested_header_.empty())
+    return false;
+  if (is_full_use())
+    return true;
+  // If the forward-declarable type has no fwd-decl mappings, public_headers_ is
+  // empty, and no header should be picked for suggestion.
+  return !public_headers().empty();
 }
 
 namespace internal {
@@ -504,30 +531,12 @@ string MungedForwardDeclareLineForTemplates(const TemplateDecl* decl) {
   // attributes.
   PrintingPolicy policy = decl->getASTContext().getPrintingPolicy();
   policy.PolishForDeclaration = true;
+  policy.SuppressDeclAttributes = true;
   decl->print(ostream, policy);
 
   // Note that line is not a user-formatted C++ declaration at this point, but
   // rather on the exact form printed by Clang, so it's safe to make certain
   // assumptions about format.
-
-  // Can remove this after https://github.com/llvm/llvm-project/pull/174197.
-  line = CollapseRepeated(line, ' ');
-
-  // Remove any class property specifiers. The final keyword is not allowed on
-  // forward-decls. An alignas(x) specifier must match earlier declarations, so
-  // forward-decls become more resistant to change without it.
-  //
-  // TODO: If 'alignas(...)' is followed by a closing paren later in the line,
-  // this will munch up everything until then. I have not been able to come up
-  // with a valid C++ example with this shape, e.g.
-  //
-  //   template<class T> alignas(8) class C (oopsie)
-  //                              ^^^^^^^^^^^^^^^^^
-  //                                   DANGER!
-  //
-  // See if we can get Clang to remove the attrs to get rid of this regex hack.
-  static regex specifiers(R"( (alignas\(.*\)|final$))");
-  line = regex_replace(line, specifiers, "");
 
   // The template name is now the last word on the line. Drop it.
   const string::size_type namepos = line.rfind(' ');
@@ -732,7 +741,7 @@ void IwyuFileInfo::ReportFullSymbolUse(SourceLocation use_loc,
     }
 
     symbol_uses_.push_back(OneUse(report_decl, use_loc, report_decl_loc,
-                                  OneUse::kFullUse, flags, comment));
+                                  UseKind::Full, flags, comment));
     LogSymbolUse("Marked full-info use of decl", symbol_uses_.back());
   }
 }
@@ -783,7 +792,7 @@ void IwyuFileInfo::ReportForwardDeclareUse(SourceLocation use_loc,
   // happened here, replace the friend with a real fwd decl.
   decl = GetNonfriendClassRedecl(decl);
   symbol_uses_.push_back(OneUse(decl, use_loc, GetLocation(decl),
-                                OneUse::kForwardDeclareUse, flags, comment));
+                                UseKind::FwdDecl, flags, comment));
   LogSymbolUse("Marked fwd-decl use of decl", symbol_uses_.back());
 }
 
@@ -903,14 +912,15 @@ set<string> CalculateMinimalIncludes(
   // those in private header files that only map to one public file.
   // For every other decl, we store the (decl, public-headers) pair.
   for (OneUse& use : *uses) {
-    // We don't need to add any #includes for non-full-use.
-    if (use.ignore_use() || !use.is_full_use())
+    if (use.ignore_use())
       continue;
     // Special case #1: Some uses come with a suggested header already picked.
     if (use.has_suggested_header()) {
       desired_headers.insert(use.suggested_header());
       continue;
     }
+    if (!use.NeedsSuggestedHeader())
+      continue;
     // Special case #2: if the dfn-file maps to the use-file, then
     // this is a file that the use-file is re-exporting symbols for,
     // and we should keep the #include as-is.
@@ -1052,10 +1062,10 @@ set<string> CalculateMinimalIncludes(
 //
 // Trimming forward-declare uses (1st pass):
 // A1) If not a class or a templated class, recategorize as a full use.
-// A2) If a templated class with default template params, recategorize
-//     as a full use (forward-declaring in that case is too error-prone).
-// A3) If a symbol in std, recategorize as a full use. The C++ standard forbids
+// A2) If a symbol in std, recategorize as a full use. The C++ standard forbids
 //     declarations in std namespace in user's code, in general.
+// A3) If a templated class with default template params, recategorize
+//     as a full use (forward-declaring in that case is too error-prone).
 // A4) If the file containing the use has a pragma inhibiting the forward
 //     declaration of the symbol, change the use to a full info use in order
 //     to make sure that the compiler can see some declaration of the symbol.
@@ -1159,27 +1169,30 @@ void ProcessForwardDeclare(OneUse* use,
   if (tpl_decl)
     tag_decl = tpl_decl->getTemplatedDecl();
 
-  // (A2) If it has default template parameters, recategorize as a full use.
-  // Do this even if the used decl is a fwd-decl so that IWYU doesn't insert
-  // another fwd-decl specifying the same default argument. But keep the use
-  // kind when the forward-declaration is in the same file so as not to suggest
-  // removing the forward-declaration as unused.
-  if (tpl_decl && HasDefaultTemplateParameters(tpl_decl) &&
-      GetFileEntry(use->use_loc()) != GetFileEntry(use->decl())) {
-    VERRS(6) << "Moving " << use->symbol_name()
-             << " from fwd-decl use to full use: has default template param"
-             << " (" << use->PrintableUseLoc() << ")\n";
-    use->set_full_use();
-    // No return here: (A4) or (A5) may cause us to ignore this decl entirely.
-  }
-
-  // (A3) If it is in namespace std, recategorize as a full use.
+  // (A2) If it is in namespace std, recategorize as a full use.
   // TODO(csilvers): if someone has specialized a class in std, the
   // specialization should be treated as in user-space and
   // forward-declarable.  Check for that case.
   if (StartsWith(use->symbol_name(), "std::")) {
+    if (use->public_headers().empty()) {
+      VERRS(6) << "Moving " << use->symbol_name()
+               << " from fwd-decl use to full use: in namespace std"
+               << " (" << use->PrintableUseLoc() << ")\n";
+      use->set_full_use();
+    }
+    // No return here: (A4) or (A5) may cause us to ignore this decl entirely.
+  }
+  // (A3) If it has default template parameters, recategorize as a full use.
+  // Do this even if the used decl is a fwd-decl so that IWYU doesn't insert
+  // another fwd-decl specifying the same default argument. But keep the use
+  // kind when the forward-declaration is in the same file so as not to suggest
+  // removing the forward-declaration as unused. Uses of fwd-decls from <iosfwd>
+  // should not be recategorized to full uses so that (D1) step works with them,
+  // hence 'else' has been placed here.
+  else if (tpl_decl && HasDefaultTemplateParameters(tpl_decl) &&
+           GetFileEntry(use->use_loc()) != GetFileEntry(use->decl())) {
     VERRS(6) << "Moving " << use->symbol_name()
-             << " from fwd-decl use to full use: in namespace std"
+             << " from fwd-decl use to full use: has default template param"
              << " (" << use->PrintableUseLoc() << ")\n";
     use->set_full_use();
     // No return here: (A4) or (A5) may cause us to ignore this decl entirely.
@@ -1191,9 +1204,9 @@ void ProcessForwardDeclare(OneUse* use,
   if (!use->is_full_use()) {
     if (preprocessor_info->ForwardDeclareIsInhibited(
             GetFileEntry(use->use_loc()), use->symbol_name())) {
-      VERRS(6) << "Changing fwd-decl use of " << use->symbol_name()
-               << " (" << use->PrintableUseLoc()
-               << ") to a full-info use: no_forward_declare pragma\n";
+      VERRS(6) << "Moving " << use->symbol_name()
+               << " from fwd-decl use to full use: no_forward_declare pragma"
+               << " (" << use->PrintableUseLoc() << ")\n";
       use->set_full_use();
     }
   }
@@ -1244,13 +1257,19 @@ void ProcessForwardDeclare(OneUse* use,
   }
 
   // (A7) If any arbitrary redeclaration is marked with IWYU pragma: export,
-  // reset use as a full use of this decl to keep its containing file included.
+  // reset use to this decl to keep its containing file included.
   if (!use->is_full_use()) {
     for (const Decl* redecl : use->decl()->redecls()) {
       const auto* decl = cast<NamedDecl>(redecl);
       if (preprocessor_info->ForwardDeclareIsExported(decl)) {
         use->reset_decl(decl);
-        use->set_full_use();
+        use->set_suggested_header(ConvertToQuotedInclude(
+            GetFilePath(decl->getLocation()),
+            MakeAbsolutePath(GetParentPath(GetFilePath(use->use_loc())))));
+        VERRS(6) << "Updating target decl for " << use->symbol_name()
+                 << " fwd-decl use: export pragma"
+                 << " (" << use->PrintableUseLoc() << "), using decl from"
+                 << " " << PrintableLoc(GetLocation(decl)) << "\n";
         break;
       }
     }
@@ -1272,11 +1291,18 @@ void ProcessForwardDeclare(OneUse* use,
         // don't keep another include that is not necessary.
         use->reset_decl(cast<NamedDecl>(decl));
         promote_to_full_use = true;
+        VERRS(6) << "Updating target decl for " << use->symbol_name()
+                 << " fwd-decl use: no_fwd_decls mode"
+                 << " (" << use->PrintableUseLoc() << "), using decl from"
+                 << " " << PrintableLoc(GetLocation(decl)) << "\n";
         break;
       }
     }
 
     if (promote_to_full_use) {
+      VERRS(6) << "Moving " << use->symbol_name()
+               << " from fwd-decl use to full use: no_fwd_decls mode"
+               << " (" << use->PrintableUseLoc() << ")\n";
       use->set_full_use();
     }
   }
@@ -1344,7 +1370,7 @@ void ProcessFullUse(OneUse* use, const IwyuPreprocessorInfo* preprocessor_info,
     // Just change us to a forward-declare use.  Later, we'll decide
     // which forward-declare is the best one to keep.
     VERRS(6) << "Moving " << use->symbol_name()
-             << " from full use to fwd-decl: definition found later in file"
+             << " from full use to fwd-decl use: definition found later in file"
              << " (" << use->PrintableUseLoc() << ")\n";
     use->set_forward_declare_use();
     return;
@@ -1355,13 +1381,13 @@ void ProcessFullUse(OneUse* use, const IwyuPreprocessorInfo* preprocessor_info,
   // *any* declaration is in the same file, unless the symbol is a
   // class or enum.  (Every other kind of redeclarable symbol, such as
   // functions, have the property that a decl is the same as a
-  // definition from iwyu's point of view.)  We don't bother with
-  // RedeclarableTemplate<> types (FunctionTemplateDecl), since for
-  // those types, iwyu *does* care about the definition vs declaration.
-  // All this is moot for decl uses triggered by definitions, all their redecls
-  // are separately registered as uses so that a definition anchors all its
-  // declarations (UF_RedeclUse case).
-  if (!(use->flags() & UF_RedeclUse) && !is_builtin_function_with_mappings) {
+  // definition from iwyu's point of view.)  All this is moot for decl uses
+  // triggered by definitions, all their redecls are separately registered as
+  // uses so that a definition anchors all its declarations (UF_RedeclUse case).
+  // Also, definition uses triggered by explicit instantiation definitions
+  // should not be suppressed by any redecl (UF_InstantiationPattern case).
+  if (!(use->flags() & (UF_RedeclUse | UF_InstantiationPattern)) &&
+      !is_builtin_function_with_mappings) {
     set<const NamedDecl*> all_redecls;
     if (isa<TagDecl>(use->decl()) || isa<ClassTemplateDecl>(use->decl()))
       all_redecls.insert(use->decl());  // for classes, just consider the dfn
@@ -1499,6 +1525,9 @@ void ProcessFullUse(OneUse* use, const IwyuPreprocessorInfo* preprocessor_info,
               const NamedDecl* decl = use.decl();
               return decl && (ns_decl != decl) && IsInNamespace(decl, ns_decl);
             })) {
+      VERRS(6) << "Ignoring use of namespace " << use->symbol_name() << " ("
+               << use->PrintableUseLoc() << "):"
+               << " declaration in namespace already used\n";
       use->set_ignore_use();
       return;
     }
@@ -1568,8 +1597,11 @@ void CalculateIwyuForForwardDeclareUse(
   vector<const NamedDecl*> dfns;
   // A definition in any of desired headers makes the forward-declaration
   // redundant, but not when the fwd-decl specifies a default template argument.
+  // This doesn't apply to templates from 'std' because the standard guarantees
+  // that both headers with forward-declarations and with definitions should
+  // provide default arguments, if any.
   bool has_def_arg = tpl_decl && HasDefaultTemplateParameters(tpl_decl);
-  if (!has_def_arg) {
+  if (!has_def_arg || StartsWith(use->symbol_name(), "std::")) {
     if (const NamedDecl* dfn = GetTagDefinition(use->decl()))
       dfns.push_back(dfn);
     if (tpl_decl) {
@@ -1586,22 +1618,25 @@ void CalculateIwyuForForwardDeclareUse(
   // fact.  Also if it's defined in one of the actual_includes.
   const NamedDecl* dfn_from_desired_includes = nullptr;
   const NamedDecl* dfn_from_actual_includes = nullptr;
+  string desired_hdr_with_dfn;
   for (const NamedDecl* dfn : dfns) {
-    vector<string> headers =
-        GlobalIncludePicker().GetCandidateHeadersForFilepathIncludedFrom(
-            GetFilePath(dfn), GetFilePath(use->use_loc()));
+    vector<string> headers = GlobalIncludePicker().GetMappedPublicHeaders(
+        dfn, GetFilePath(use->use_loc()), GetFilePath(dfn));
     for (const string& header : headers) {
-      if (ContainsKey(desired_includes, header))
+      if (ContainsKey(desired_includes, header)) {
         dfn_from_desired_includes = dfn;
+        desired_hdr_with_dfn = header;
+      }
       if (ContainsKey(actual_includes, header))
         dfn_from_actual_includes = dfn;
     }
-    // We ourself are always a 'desired' and 'actual' include (though
-    // only if the definition is visible from the use location).
     if (IsBeforeInSameFile(dfn, use->use_loc())) {
-      dfn_from_desired_includes = dfn;
-      dfn_from_actual_includes = dfn;
-      break;
+      // TODO(bolshakov): this looks like a duplicate of A6 step. Deduplicate.
+      VERRS(6) << "Ignoring fwd-decl use of " << use->symbol_name() << " ("
+               << use->PrintableUseLoc() << "):"
+               << " dfn already present\n";
+      use->set_ignore_use();
+      return;
     }
   }
 
@@ -1620,46 +1655,49 @@ void CalculateIwyuForForwardDeclareUse(
   if (!same_file_decl) {
     for (const NamedDecl* redecl : redecls) {
       if (ContainsKey(associated_includes, GetFileEntry(redecl))) {
-        same_file_decl = redecl;
-        break;
+        VERRS(6) << "Ignoring fwd-decl use of " << use->symbol_name() << " ("
+                 << use->PrintableUseLoc() << "):"
+                 << " redecl present in associated header\n";
+        use->set_ignore_use();
+        return;
       }
     }
   }
 
   // (D1) Mark that the fwd-declare is satisfied by dfn in desired include.
-  const NamedDecl* providing_decl = nullptr;
   if (dfn_from_desired_includes) {
-    providing_decl = dfn_from_desired_includes;
-    VERRS(6) << "Noting fwd-decl use of " << use->symbol_name()
-             << " (" << use->PrintableUseLoc() << ") is satisfied by dfn in "
-             << PrintableLoc(GetLocation(providing_decl)) << "\n";
     // Mark that this use is another reason we want this header.
-    const string file = GetFilePath(providing_decl);
-    const string quoted_hdr = ConvertToQuotedInclude(file);
-    use->set_suggested_header(quoted_hdr);
+    CHECK_(!desired_hdr_with_dfn.empty());
+    use->reset_decl(dfn_from_desired_includes);
+    use->set_suggested_header(desired_hdr_with_dfn);
+    VERRS(6) << "Updating target decl for " << use->symbol_name()
+             << " fwd-decl use: satisfied by desired file"
+             << " (" << use->PrintableUseLoc() << "), using decl from"
+             << " " << PrintableLoc(GetLocation(use->decl())) << "\n";
   } else if (same_file_decl) {
-    providing_decl = same_file_decl;
-    VERRS(6) << "Noting fwd-decl use of " << use->symbol_name()
-             << " (" << use->PrintableUseLoc() << ") is declared at "
-             << PrintableLoc(GetLocation(providing_decl)) << "\n";
-    // If same_file_decl is actually in an associated .h, mark our use
-    // of that.  No need to map-to-public for associated .h files.
-    if (GetFileEntry(same_file_decl) != GetFileEntry(use->use_loc()))
-      use->set_suggested_header(GetFilePath(same_file_decl));
-  }
-  if (providing_decl) {
-    // Change decl_ to point to this "better" redecl.
-    use->reset_decl(providing_decl);
+    use->reset_decl(same_file_decl);
+    VERRS(6) << "Updating target decl for " << use->symbol_name()
+             << " fwd-decl use: satisfied by same file"
+             << " (" << use->PrintableUseLoc() << "), using decl from"
+             << " " << PrintableLoc(GetLocation(use->decl())) << "\n";
   }
 
-  // Be sure to store as a TemplateClassDecl if we're a templated
-  // class.
+  // Be sure to store as a ClassTemplateDecl if we're a templated class.
   if (const ClassTemplateSpecializationDecl* spec_decl =
           DynCastFrom(use->decl())) {
     use->reset_decl(spec_decl->getSpecializedTemplate());
+    VERRS(6) << "Updating target decl for " << use->symbol_name()
+             << " fwd-decl use: primary template"
+             << " (" << use->PrintableUseLoc() << "), using decl from"
+             << " " << PrintableLoc(GetLocation(use->decl())) << "\n";
   } else if (const CXXRecordDecl* cxx_decl = DynCastFrom(use->decl())) {
-    if (cxx_decl->getDescribedClassTemplate())
+    if (cxx_decl->getDescribedClassTemplate()) {
       use->reset_decl(cxx_decl->getDescribedClassTemplate());
+      VERRS(6) << "Updating target decl for " << use->symbol_name()
+               << " fwd-decl use: described class template"
+               << " (" << use->PrintableUseLoc() << "), using decl from"
+               << " " << PrintableLoc(GetLocation(use->decl())) << "\n";
+    }
   }
 
   // (D2) Mark iwyu violation unless defined in a current #include.
@@ -1888,13 +1926,12 @@ void CalculateDesiredIncludesAndForwardDeclares(
     if (use.ignore_use())
       continue;
 
-    if (use.is_full_use()) {
-      CHECK_(use.has_suggested_header() && "Full uses should have #includes");
+    if (use.has_suggested_header()) {
       if (!Contains(*lines, use.suggested_header())) { // must be added
         lines->push_back(OneIncludeOrForwardDeclareLine(
             use.decl_file(), use.suggested_header(), -1));
       }
-    } else if (!use.has_suggested_header()) {
+    } else {
       // Forward-declare uses that are already satisfied by an #include
       // have that as their suggested_header.  For the rest, we need to
       // make sure there's a forward-declare in the current file.
@@ -1960,13 +1997,16 @@ void CalculateDesiredIncludesAndForwardDeclares(
       for (auto it = range.first; it != range.second; ++it) {
         it->second->set_desired();
       }
-    } else if (ContainsKey(include_map, use.suggested_header())) {
-      // If we satisfy a forward-declare use from a file, let the file
-      // know (this is just for logging).
-      const string symbol_name = use.short_symbol_name();
+    } else {
+      // If we satisfy a forward-declare use from a file, let the file know.
+      const string symbol_name = GlobalFlags().comments_with_namespace
+                                     ? use.symbol_name()
+                                     : use.short_symbol_name();
 
       auto range = include_map.equal_range(use.suggested_header());
+      CHECK_(range.first != range.second);
       for (auto it = range.first; it != range.second; ++it) {
+        it->second->set_desired();
         if (!it->second->HasSymbolUse(symbol_name))
           it->second->AddSymbolUse(symbol_name + " (ptr only)");
       }

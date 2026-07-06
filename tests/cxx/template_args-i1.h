@@ -16,3 +16,9 @@ struct TplHost {
   template <typename>
   struct InnerTpl {};
 };
+
+class Class {};
+
+constexpr int GetInt() {
+  return 1;
+}

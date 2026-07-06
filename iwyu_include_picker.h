@@ -53,9 +53,6 @@
 
 #include "clang/Basic/FileEntry.h"
 
-// TODO: Clean out pragmas as IWYU improves.
-// IWYU pragma: no_include <iterator>
-
 namespace clang {
 class NamedDecl;
 }
@@ -71,6 +68,9 @@ using std::vector;
 
 enum class RegexDialect;
 struct IncludeMapEntry;
+struct SymbolMapEntry;
+
+enum class UseKind { Full, FwdDecl };
 
 enum IncludeVisibility { kUnusedVisibility, kPublic, kPrivate };
 enum class CStdLib { None, ClangSymbols, Glibc };
@@ -151,6 +151,8 @@ class IncludePicker {
   // most standard) header for the symbol.
   vector<MappedInclude> GetCandidateHeadersForSymbol(
       const string& symbol) const;
+  vector<string> GetCandidateHeadersForSymbolFwdDecl(
+      const string& symbol, const string& including_filepath) const;
 
   // As above, but given a specific including header it is possible to convert
   // mapped includes to quoted include strings (because we can for example know
@@ -222,13 +224,14 @@ class IncludePicker {
   // Adds a mapping from a a symbol to a quoted include. We use this to
   // maintain mappings of documented types, e.g.
   //  For std::map<>, include <map>.
-  void AddSymbolMapping(
-      const string& map_from, const MappedInclude& map_to,
-      IncludeVisibility to_visibility);
+  void AddSymbolMapping(const string& map_from,
+                        UseKind use_kind,
+                        const MappedInclude& map_to,
+                        IncludeVisibility to_visibility);
 
   // Adds mappings from sized arrays of IncludeMapEntry.
   void AddIncludeMappings(const IncludeMapEntry* entries, size_t count);
-  void AddSymbolMappings(const IncludeMapEntry* entries, size_t count);
+  void AddSymbolMappings(const SymbolMapEntry* entries, size_t count);
 
   void AddPublicIncludes(const char** includes, size_t count);
 
@@ -268,8 +271,10 @@ class IncludePicker {
   vector<string> BestQuotedIncludesForIncluder(
       const vector<MappedInclude>&, const string& including_filepath) const;
 
-  // From symbols to includes.
+  // From symbols to includes for full symbol uses.
   IncludeMap symbol_include_map_;
+  // From symbols to includes for uses that require only forward-declarations.
+  IncludeMap fwd_decl_symbol_map_;
 
   // From quoted filepath patterns to includes, where a pattern can be
   // either a quoted filepath (e.g. "foo/bar.h" or <a/b.h>) or @

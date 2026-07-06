@@ -55,6 +55,8 @@ int e = LocalFn(5);
 // hence no reporting.
 int f = InlineImplicitCtorRefFn(6);
 
+int g = ImplicitCtorInPartialFn(7);
+
 // Make sure we are responsible for the conversion when it's not for a
 // function call.
 // IWYU: IndirectWithImplicitCtor is...*implicit_ctor-i2.h
@@ -129,6 +131,87 @@ void TestNoCrashOnUnresolvedCall(T t) {
   t.SomeFn(NonAggregate{});
 }
 
+// IWYU: OuterAggregate1 needs a declaration
+void TakeOuterAggregate1(OuterAggregate1);
+// IWYU: OuterAggregate2 needs a declaration
+void TakeOuterAggregate2(OuterAggregate2);
+// IWYU: OuterAggregateWithRef needs a declaration
+void TakeOuterAggregateWithRef(OuterAggregateWithRef);
+void TakeNonProvidingOuterAggregate1(NonProvidingOuterAggregate1);
+void TakeProvidingOuterAggregate1(ProvidingOuterAggregate1);
+// IWYU: AggregateWithNonAggregate needs a declaration
+void TakeAggregateWithNonAggregate(AggregateWithNonAggregate);
+
+template <typename T, typename>
+void TestAggregateInitTplFn() {
+  void TakeT(T);
+  TakeT({});
+}
+
+// IWYU: OuterAggregate1 needs a declaration
+void TestAggregateInit(const OuterAggregate1& par) {
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  auto local_copy = par;
+  // IWYU: OuterAggregate1 needs a declaration
+  const OuterAggregate1& local_ref{par};
+  // IWYU: OuterAggregate1 needs a declaration
+  const OuterAggregate1&& rvalue_ref{static_cast<const OuterAggregate1&&>(par)};
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  TakeOuterAggregate1(par);
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  TakeOuterAggregate1({});
+  // Requiring InnerAggregate1 complete type here facilitates probable
+  // transforming the type of 'inner' into 'const InnerAggregate1&'.
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  // IWYU: InnerAggregate1 is...*implicit_ctor-i2.h
+  TakeOuterAggregate1({{}});
+  // IWYU: OuterAggregate1 needs a declaration
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  const OuterAggregate1& oa11 = {};
+  // IWYU: OuterAggregate1 needs a declaration
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  // IWYU: InnerAggregate1 is...*implicit_ctor-i2.h
+  const OuterAggregate1& oa12 = {{}};
+  // IWYU: OuterAggregate2 is...*implicit_ctor-i2.h
+  TakeOuterAggregate2({1, 2, 3, 4});
+  // IWYU: OuterAggregate2 is...*implicit_ctor-i2.h
+  // IWYU: InnerAggregate2 is...*implicit_ctor-i2.h
+  TakeOuterAggregate2({1, {2, 3}, 4});
+  // IWYU: OuterAggregateWithRef is...*implicit_ctor-i2.h
+  // IWYU: InnerAggregate1 is...*implicit_ctor-i2.h
+  TakeOuterAggregateWithRef({{}});
+  // IWYU: OuterAggregate1 needs a declaration
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  // IWYU: InnerAggregate1 needs a declaration
+  TestAggregateInitTplFn<OuterAggregate1, InnerAggregate1>();
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  const NonProvidingOuterAggregate1& npoa1 = {};
+  const ProvidingOuterAggregate1& poa1 = {};
+  // IWYU: OuterAggregate1 is...*implicit_ctor-i2.h
+  TakeNonProvidingOuterAggregate1({});
+  TakeProvidingOuterAggregate1({});
+
+  // There is no point in reporting I2NonAggregate here.
+  // IWYU: AggregateWithNonAggregate needs a declaration
+  // IWYU: AggregateWithNonAggregate is...*implicit_ctor-i2.h
+  const AggregateWithNonAggregate& awna = {};
+  // IWYU: AggregateWithNonAggregate is...*implicit_ctor-i2.h
+  TakeAggregateWithNonAggregate({});
+  // In these cases, I2NonAggregate should be reported because
+  // AggregateWithNonAggregate::na could be 'const I2NonAggregate&'.
+  // IWYU: I2NonAggregate is...*implicit_ctor-i2.h
+  // IWYU: AggregateWithNonAggregate is...*implicit_ctor-i2.h
+  TakeAggregateWithNonAggregate({{}});
+  // IWYU: I2NonAggregate is...*implicit_ctor-i2.h
+  // IWYU: AggregateWithNonAggregate is...*implicit_ctor-i2.h
+  TakeAggregateWithNonAggregate({{1}});
+  // In contrast to subaggregates, AggregateWithNonAggregate::na could be
+  // a reference even in this case.
+  // IWYU: I2NonAggregate is...*implicit_ctor-i2.h
+  // IWYU: AggregateWithNonAggregate is...*implicit_ctor-i2.h
+  TakeAggregateWithNonAggregate({1});
+}
+
 /**** IWYU_SUMMARY
 
 tests/cxx/implicit_ctor.cc should add these lines:
@@ -137,8 +220,8 @@ tests/cxx/implicit_ctor.cc should add these lines:
 tests/cxx/implicit_ctor.cc should remove these lines:
 
 The full include-list for tests/cxx/implicit_ctor.cc:
-#include "tests/cxx/implicit_ctor-d1.h"  // for ImplicitCtorFn, ImplicitCtorRefFn, InlineImplicitCtorRefFn, TakeMultipleRedeclStruct
-#include "tests/cxx/implicit_ctor-d2.h"  // for NoTrivialCtorDtorNonProvidingAlias, NonProviding
-#include "tests/cxx/implicit_ctor-i2.h"  // for IndirectWithImplicitCtor, NoAutocastCtor, NoTrivialCtorDtor
+#include "tests/cxx/implicit_ctor-d1.h"  // for ImplicitCtorFn, ImplicitCtorInPartialFn, ImplicitCtorRefFn, InlineImplicitCtorRefFn, ProvidingOuterAggregate1, TakeMultipleRedeclStruct
+#include "tests/cxx/implicit_ctor-d2.h"  // for NoTrivialCtorDtorNonProvidingAlias, NonProviding, NonProvidingOuterAggregate1
+#include "tests/cxx/implicit_ctor-i2.h"  // for AggregateWithNonAggregate, I2NonAggregate, IndirectWithImplicitCtor, InnerAggregate1, InnerAggregate2, NoAutocastCtor, NoTrivialCtorDtor, OuterAggregate1, OuterAggregate2, OuterAggregateWithRef
 
 ***** IWYU_SUMMARY */
